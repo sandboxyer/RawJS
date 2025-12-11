@@ -73,7 +73,6 @@ if [ "$COUNT" -eq 0 ]; then
 fi
 
 echo -e "${YELLOW}Found $COUNT .asm files to process${NC}"
-echo "$ASM_FILES"
 
 # Now compile and link all .asm files
 echo -e "${BLUE}\nCompiling and linking .asm files...${NC}"
@@ -83,8 +82,8 @@ total_files=0
 compiled_files=0
 failed_files=0
 
-# Process each .asm file
-echo "$ASM_FILES" | while IFS= read -r asm_file; do
+# Use process substitution to avoid pipe issues with variable scope
+while IFS= read -r asm_file; do
     ((total_files++))
     
     echo -e "\n${YELLOW}[${total_files}] Processing: ${asm_file}${NC}"
@@ -129,27 +128,64 @@ echo "$ASM_FILES" | while IFS= read -r asm_file; do
     rm -f "$object_file" 2>/dev/null || true
     echo -e "  ${BLUE}✓ Cleaned up object file${NC}"
     
-done
+done < <(echo "$ASM_FILES")
 
 # Summary
 echo -e "\n${BLUE}=== Compilation Summary ===${NC}"
 echo -e "${GREEN}Successfully compiled and linked: ${compiled_files} files${NC}"
-echo -e "${RED}Failed: ${failed_files} files${NC}"
+if [ $failed_files -gt 0 ]; then
+    echo -e "${RED}Failed: ${failed_files} files${NC}"
+fi
 echo -e "Total .asm files processed: ${total_files}"
 echo -e "${GREEN}Output directory: ./dev${NC}"
 
-# Display what's in /dev
-echo -e "\n${BLUE}=== /dev Directory Contents ===${NC}"
-find "./dev" -type f 2>/dev/null | while IFS= read -r file; do
-    echo "  File: $file"
+# Display what's in /dev with tree-like structure
+echo -e "\n${BLUE}=== /dev Directory Structure ===${NC}"
+echo -e "${GREEN}Executable files created:${NC}"
+
+# Use a simple tree display
+list_files() {
+    local indent="$1"
+    local dir="$2"
+    
+    for item in "$dir"/*; do
+        if [ -d "$item" ]; then
+            echo -e "${indent}└── $(basename "$item")/"
+            list_files "    $indent" "$item"
+        elif [ -f "$item" ]; then
+            if [ -x "$item" ]; then
+                echo -e "${indent}└── ${GREEN}$(basename "$item") ✓${NC}"
+            else
+                echo -e "${indent}└── $(basename "$item")"
+            fi
+        fi
+    done
+}
+
+# Start listing from ./dev
+for item in ./dev/*; do
+    if [ -d "$item" ]; then
+        echo "└── $(basename "$item")/"
+        list_files "    " "$item"
+    elif [ -f "$item" ]; then
+        if [ -x "$item" ]; then
+            echo -e "└── ${GREEN}$(basename "$item") ✓${NC}"
+        else
+            echo "└── $(basename "$item")"
+        fi
+    fi
 done
 
-# Check if any files were created
-DEV_FILE_COUNT=$(find "./dev" -type f 2>/dev/null | wc -l)
-if [ "$DEV_FILE_COUNT" -eq 0 ]; then
-    echo -e "\n${RED}No files were created in ./dev directory!${NC}"
+# Verify all files were created
+echo -e "\n${BLUE}=== Verification ===${NC}"
+echo -e "Expected files: $COUNT"
+echo -e "Created files: $(find "./dev" -type f 2>/dev/null | wc -l)"
+
+if [ "$COUNT" -eq "$(find "./dev" -type f 2>/dev/null | wc -l)" ]; then
+    echo -e "${GREEN}✓ All files were successfully created!${NC}"
 else
-    echo -e "\n${GREEN}Created $DEV_FILE_COUNT files in ./dev directory${NC}"
+    echo -e "${YELLOW}⚠ Some files might be missing${NC}"
 fi
 
-echo -e "\n${GREEN}Script completed!${NC}"
+echo -e "\n${GREEN}Build completed successfully!${NC}"
+echo -e "All binaries are available in the ./dev directory"

@@ -1,0 +1,1046 @@
+section .data
+    ; Colors for output - alternating colors
+    reset_color_str   db 0x1B, "[0m", 0
+    color1           db 0x1B, "[1;33m", 0  ; Bright yellow
+    color2           db 0x1B, "[1;36m", 0  ; Bright cyan
+    color3           db 0x1B, "[1;32m", 0  ; Bright green
+    color4           db 0x1B, "[1;35m", 0  ; Bright magenta
+    
+    ; Tags for JavaScript instances
+    js_start_tag     db "<js-start>", 0
+    js_end_tag       db "<js-end>", 10, 0   ; Newline after closing tag
+    
+    ; Error messages
+    err_no_file       db "Error: No input file specified.", 10, 0
+    err_open          db "Error: Could not open file.", 10, 0
+    err_read          db "Error: Could not read file.", 10, 0
+    
+    ; Output formatting
+    newline           db 10, 0
+    tab               db "    ", 0
+    
+    ; State tracking
+    in_string         db 0
+    in_template       db 0
+    in_comment        db 0
+    paren_depth       dd 0
+    brace_depth       dd 0
+    bracket_depth     dd 0
+    last_char         db 0
+    skip_next_space   db 0
+    in_block          db 0
+    block_started     db 0
+    empty_statement   db 0
+    arrow_pending     db 0
+    
+    ; Color rotation
+    color_index       dd 0
+    color_array       dq color1, color2, color3, color4
+    
+    ; Buffers
+    current_stmt      times 1024 db 0
+    char_buffer       db 0
+    stmt_started      db 0
+    current_color     dq 0
+
+section .bss
+    file_handle       resq 1
+    file_size         resq 1
+    file_buffer       resb 65536
+
+section .text
+    global _start
+
+; ------------------------------------------------------------
+; START OF PROGRAM - Clean entry point
+; ------------------------------------------------------------
+_start:
+    ; Get command line arguments
+    pop rcx                 ; Get argc
+    cmp rcx, 2
+    jl .no_file
+    
+    pop rdi                 ; Skip program name
+    pop rdi                 ; Get filename
+    
+    ; Open the file
+    mov rax, 2              ; sys_open
+    mov rsi, 0              ; O_RDONLY
+    mov rdx, 0              ; No additional flags
+    syscall
+    cmp rax, 0
+    jl .open_error
+    mov [file_handle], rax
+    
+    ; Get file size
+    mov rax, 8              ; sys_lseek
+    mov rdi, [file_handle]
+    mov rsi, 0
+    mov rdx, 2              ; SEEK_END
+    syscall
+    cmp rax, 0
+    jl .read_error
+    mov [file_size], rax
+    
+    ; Reset to beginning
+    mov rax, 8              ; sys_lseek
+    mov rdi, [file_handle]
+    mov rsi, 0
+    mov rdx, 0              ; SEEK_SET
+    syscall
+    
+    ; Read entire file (validate size first)
+    cmp qword [file_size], 65536
+    jg .read_error          ; File too large
+    
+    mov rax, 0              ; sys_read
+    mov rdi, [file_handle]
+    mov rsi, file_buffer
+    mov rdx, [file_size]
+    syscall
+    cmp rax, 0
+    jl .read_error
+    
+    ; Close file
+    mov rax, 3              ; sys_close
+    mov rdi, [file_handle]
+    syscall
+    
+    ; Process the file
+    call process_file
+    
+    ; Clean exit
+    jmp .exit
+
+.no_file:
+    mov rsi, err_no_file
+    call print_string
+    mov rdi, 1              ; Exit code 1 for no file
+    jmp .exit_now
+
+.open_error:
+    mov rsi, err_open
+    call print_string
+    mov rdi, 2              ; Exit code 2 for open error
+    jmp .exit_now
+
+.read_error:
+    mov rsi, err_read
+    call print_string
+    mov rdi, 3              ; Exit code 3 for read error
+
+.exit:
+    mov rdi, 0              ; Success exit code
+
+.exit_now:
+    mov rax, 60             ; sys_exit
+    syscall
+
+; ------------------------------------------------------------
+; GET NEXT COLOR - Rotates through colors (safe)
+; ------------------------------------------------------------
+get_next_color:
+    push rbx
+    
+    ; Get current color index
+    mov ebx, [color_index]
+    
+    ; Validate index is within bounds (0-3)
+    cmp ebx, 4
+    jl .index_ok
+    xor ebx, ebx            ; Reset to 0 if out of bounds
+    mov [color_index], ebx
+    
+.index_ok:
+    ; Get color from array
+    mov rax, [color_array + rbx*8]
+    mov [current_color], rax
+    
+    ; Increment index and wrap around (4 colors)
+    inc ebx
+    cmp ebx, 4
+    jl .no_wrap
+    xor ebx, ebx
+.no_wrap:
+    mov [color_index], ebx
+    
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; PROCESS FILE - Main processing loop (cleaned)
+; ------------------------------------------------------------
+process_file:
+    push rbx
+    push r12
+    push r13
+    
+    mov r12, file_buffer    ; Current position in file
+    mov r13, file_buffer
+    add r13, [file_size]    ; End of file
+    
+    ; Initialize state safely
+    mov dword [paren_depth], 0
+    mov dword [brace_depth], 0
+    mov dword [bracket_depth], 0
+    mov byte [in_string], 0
+    mov byte [in_template], 0
+    mov byte [in_comment], 0
+    mov byte [stmt_started], 0
+    mov byte [last_char], 0
+    mov byte [skip_next_space], 0
+    mov byte [in_block], 0
+    mov byte [block_started], 0
+    mov byte [empty_statement], 0
+    mov byte [arrow_pending], 0
+    mov dword [color_index], 0
+    
+    ; Get first color
+    call get_next_color
+    
+    ; Clear statement buffer
+    call clear_stmt_buffer
+
+.process_loop:
+    cmp r12, r13
+    jge .process_done
+    
+    ; Get current character
+    mov al, [r12]
+    mov [char_buffer], al
+    inc r12
+    
+    ; Skip whitespace at beginning of statement
+    cmp byte [stmt_started], 0
+    jne .not_start_whitespace
+    
+    cmp al, ' '
+    je .skip_char
+    cmp al, 9      ; Tab
+    je .skip_char
+    cmp al, 10     ; Newline
+    je .skip_char
+    cmp al, 13     ; Carriage return
+    je .skip_char
+    
+    mov byte [stmt_started], 1
+
+.not_start_whitespace:
+    ; Check if we're inside a string
+    cmp byte [in_string], 1
+    je .handle_string_char
+    
+    ; Check if we're inside a template literal
+    cmp byte [in_template], 1
+    je .handle_template_char
+    
+    ; Check if we're inside a comment
+    cmp byte [in_comment], 1
+    je .handle_single_comment
+    cmp byte [in_comment], 2
+    je .handle_multi_comment
+    
+    ; Check for start of string
+    cmp al, '"'
+    je .start_string
+    
+    ; Check for start of template literal
+    cmp al, '`'
+    je .start_template
+    
+    ; Check for start of comment
+    cmp al, '/'
+    je .check_comment
+    
+    ; Handle spaces - only add one space between tokens
+    cmp al, ' '
+    je .handle_space
+    
+    ; Handle tabs
+    cmp al, 9
+    je .handle_space
+    
+    ; Handle newlines
+    cmp al, 10
+    je .handle_newline
+    cmp al, 13
+    je .handle_newline
+    
+    ; Check for statement boundaries
+    cmp al, ';'
+    je .handle_semicolon
+    
+    ; Check for braces
+    cmp al, '{'
+    je .open_brace
+    cmp al, '}'
+    je .close_brace
+    
+    ; Check for parentheses
+    cmp al, '('
+    je .open_paren
+    cmp al, ')'
+    je .close_paren
+    
+    ; Check for square brackets (arrays)
+    cmp al, '['
+    je .open_bracket
+    cmp al, ']'
+    je .close_bracket
+    
+    ; Check for equals sign (might be part of arrow function)
+    cmp al, '='
+    je .handle_equals
+    
+    ; Reset skip space flag (we found a non-space)
+    mov byte [skip_next_space], 0
+    
+    ; Clear empty statement flag when we find content
+    mov byte [empty_statement], 0
+    
+    ; Clear arrow pending flag for non-arrow characters
+    cmp al, '>'
+    jne .not_arrow_check
+    jmp .check_arrow
+
+.not_arrow_check:
+    mov byte [arrow_pending], 0
+    
+    ; Add character to statement buffer
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    jmp .process_loop
+
+.skip_char:
+    jmp .process_loop
+
+.start_string:
+    ; Reset skip space flag
+    mov byte [skip_next_space], 0
+    
+    ; Clear empty statement flag when we find content
+    mov byte [empty_statement], 0
+    
+    ; Clear arrow pending flag
+    mov byte [arrow_pending], 0
+    
+    ; Add quote to statement buffer
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    ; Set string flag
+    mov byte [in_string], 1
+    jmp .process_loop
+
+.start_template:
+    ; Reset skip space flag
+    mov byte [skip_next_space], 0
+    
+    ; Clear empty statement flag when we find content
+    mov byte [empty_statement], 0
+    
+    ; Clear arrow pending flag
+    mov byte [arrow_pending], 0
+    
+    ; Add backtick to statement buffer
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    ; Set template flag
+    mov byte [in_template], 1
+    jmp .process_loop
+
+.check_comment:
+    ; Check if this is a comment start
+    cmp r12, r13
+    jge .not_comment
+    
+    mov bl, [r12]
+    cmp bl, '/'
+    je .start_single_comment
+    cmp bl, '*'
+    je .start_multi_comment
+
+.not_comment:
+    ; Reset skip space flag
+    mov byte [skip_next_space], 0
+    
+    ; Clear empty statement flag when we find content
+    mov byte [empty_statement], 0
+    
+    ; Clear arrow pending flag
+    mov byte [arrow_pending], 0
+    
+    ; Just a regular slash
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    jmp .process_loop
+
+.start_single_comment:
+    ; Skip second slash
+    inc r12
+    mov byte [in_comment], 1
+    jmp .process_loop
+
+.start_multi_comment:
+    ; Skip asterisk
+    inc r12
+    mov byte [in_comment], 2
+    jmp .process_loop
+
+.handle_string_char:
+    ; Add character to statement
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    ; Check for string end
+    cmp al, '"'
+    jne .process_loop
+    
+    ; Check for escaped quote
+    cmp r12, file_buffer
+    jle .process_loop       ; Can't check if at beginning
+    cmp byte [r12-2], '\'
+    je .process_loop
+    
+    ; End of string
+    mov byte [in_string], 0
+    jmp .process_loop
+
+.handle_template_char:
+    ; Add character to statement
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    ; Check for template end
+    cmp al, '`'
+    jne .process_loop
+    
+    ; Check for escaped backtick
+    cmp r12, file_buffer
+    jle .process_loop       ; Can't check if at beginning
+    cmp byte [r12-2], '\'
+    je .process_loop
+    
+    ; End of template
+    mov byte [in_template], 0
+    jmp .process_loop
+
+.handle_single_comment:
+    ; Check for newline (end of comment)
+    cmp al, 10
+    jne .process_loop
+    
+    mov byte [in_comment], 0
+    jmp .process_loop
+
+.handle_multi_comment:
+    ; Check for comment end
+    cmp al, '*'
+    jne .process_loop
+    
+    cmp r12, r13
+    jge .process_loop
+    
+    mov bl, [r12]
+    cmp bl, '/'
+    jne .process_loop
+    
+    ; Skip the slash
+    inc r12
+    mov byte [in_comment], 0
+    jmp .process_loop
+
+.handle_space:
+    ; Check if we should skip this space
+    cmp byte [skip_next_space], 1
+    je .process_loop
+    
+    ; Don't add space after certain characters
+    mov bl, [last_char]
+    cmp bl, '('
+    je .process_loop
+    cmp bl, '['
+    je .process_loop
+    cmp bl, '{'
+    je .process_loop
+    cmp bl, ';'
+    je .process_loop
+    cmp bl, ':'
+    je .process_loop
+    cmp bl, ','
+    je .process_loop
+    
+    ; Add single space
+    call append_to_stmt
+    mov byte [skip_next_space], 1
+    mov byte [last_char], ' '
+    jmp .process_loop
+
+.handle_newline:
+    ; Set flag to skip next spaces
+    mov byte [skip_next_space], 1
+    jmp .process_loop
+
+.handle_equals:
+    ; Reset skip space flag
+    mov byte [skip_next_space], 0
+    
+    ; Clear empty statement flag when we find content
+    mov byte [empty_statement], 0
+    
+    ; Set arrow pending flag when we see '='
+    mov byte [arrow_pending], 1
+    
+    ; Add equals to statement
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    jmp .process_loop
+
+.check_arrow:
+    ; Check if this '>' is part of an arrow function '=>'
+    cmp byte [arrow_pending], 1
+    jne .not_arrow
+    
+    ; It's an arrow function '=>'
+    mov byte [arrow_pending], 0
+    
+    ; Reset skip space flag
+    mov byte [skip_next_space], 0
+    
+    ; Clear empty statement flag when we find content
+    mov byte [empty_statement], 0
+    
+    ; Add '>' to statement
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    jmp .process_loop
+
+.not_arrow:
+    ; Reset skip space flag
+    mov byte [skip_next_space], 0
+    
+    ; Clear empty statement flag when we find content
+    mov byte [empty_statement], 0
+    
+    ; Clear arrow pending flag
+    mov byte [arrow_pending], 0
+    
+    ; Add '>' to statement
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    jmp .process_loop
+
+.open_brace:
+    ; Reset skip space flag
+    mov byte [skip_next_space], 0
+    
+    ; First, check if we're already in a block
+    cmp byte [in_block], 1
+    je .add_brace_to_stmt
+    
+    ; We're starting a new block
+    mov byte [in_block], 1
+    mov byte [block_started], 1
+
+.add_brace_to_stmt:
+    ; Clear empty statement flag when we find content
+    mov byte [empty_statement], 0
+    
+    ; Clear arrow pending flag
+    mov byte [arrow_pending], 0
+    
+    ; Add brace to current statement
+    mov al, '{'
+    mov [char_buffer], al
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    ; Update brace depth
+    inc dword [brace_depth]
+    jmp .process_loop
+
+.close_brace:
+    ; Reset skip space flag
+    mov byte [skip_next_space], 0
+    
+    ; Clear empty statement flag when we find content
+    mov byte [empty_statement], 0
+    
+    ; Clear arrow pending flag
+    mov byte [arrow_pending], 0
+    
+    ; Add closing brace to statement
+    mov al, '}'
+    mov [char_buffer], al
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    ; Update brace depth
+    dec dword [brace_depth]
+    
+    ; Check if we're ending a block at top level (brace_depth = 0)
+    cmp dword [brace_depth], 0
+    jne .process_loop
+    
+    ; We've returned to brace depth 0 - end of block
+    mov byte [in_block], 0
+    
+    ; CRITICAL FIX: Only print if we're not inside parentheses or brackets
+    ; (i.e., we're at the top level of a statement)
+    cmp dword [paren_depth], 0
+    jne .dont_print_brace
+    cmp dword [bracket_depth], 0
+    jne .dont_print_brace
+    
+    ; Check if statement is empty
+    cmp byte [empty_statement], 1
+    je .skip_empty_block
+    
+    call print_current_statement
+    call clear_stmt_buffer
+    mov byte [stmt_started], 0
+    mov byte [block_started], 0
+    
+    ; Get new color for next statement
+    call get_next_color
+    
+    jmp .process_loop
+
+.dont_print_brace:
+    ; We're inside parentheses or brackets, so don't print yet
+    ; Just continue building the statement
+    jmp .process_loop
+
+.skip_empty_block:
+    ; Just clear the buffer without printing
+    call clear_stmt_buffer
+    mov byte [stmt_started], 0
+    mov byte [block_started], 0
+    mov byte [empty_statement], 0
+    jmp .process_loop
+
+.open_paren:
+    ; Reset skip space flag
+    mov byte [skip_next_space], 0
+    
+    ; Clear empty statement flag when we find content
+    mov byte [empty_statement], 0
+    
+    ; Clear arrow pending flag
+    mov byte [arrow_pending], 0
+    
+    ; Add to statement buffer
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    ; Update parenthesis depth
+    inc dword [paren_depth]
+    jmp .process_loop
+
+.close_paren:
+    ; Reset skip space flag
+    mov byte [skip_next_space], 0
+    
+    ; Clear empty statement flag when we find content
+    mov byte [empty_statement], 0
+    
+    ; Clear arrow pending flag
+    mov byte [arrow_pending], 0
+    
+    ; Add to statement buffer
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    ; Update parenthesis depth
+    dec dword [paren_depth]
+    jmp .process_loop
+
+.open_bracket:
+    ; Reset skip space flag
+    mov byte [skip_next_space], 0
+    
+    ; Clear empty statement flag when we find content
+    mov byte [empty_statement], 0
+    
+    ; Clear arrow pending flag
+    mov byte [arrow_pending], 0
+    
+    ; Add to statement buffer
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    ; Update bracket depth
+    inc dword [bracket_depth]
+    jmp .process_loop
+
+.close_bracket:
+    ; Reset skip space flag
+    mov byte [skip_next_space], 0
+    
+    ; Clear empty statement flag when we find content
+    mov byte [empty_statement], 0
+    
+    ; Clear arrow pending flag
+    mov byte [arrow_pending], 0
+    
+    ; Add to statement buffer
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    ; Update bracket depth
+    dec dword [bracket_depth]
+    jmp .process_loop
+
+.handle_semicolon:
+    ; Reset skip space flag
+    mov byte [skip_next_space], 0
+    
+    ; Clear arrow pending flag
+    mov byte [arrow_pending], 0
+    
+    ; Add semicolon to statement
+    call append_to_stmt
+    
+    ; Store as last character
+    mov [last_char], al
+    
+    ; CRITICAL: Only print if:
+    ; 1. We're at top level (brace_depth = 0) AND
+    ; 2. We're not inside parentheses (paren_depth = 0) AND  
+    ; 3. We're not inside brackets (bracket_depth = 0) AND
+    ; 4. We're not inside a block (in_block = 0)
+    cmp dword [brace_depth], 0
+    jne .process_loop
+    cmp dword [paren_depth], 0
+    jne .process_loop
+    cmp dword [bracket_depth], 0
+    jne .process_loop
+    cmp byte [in_block], 0
+    jne .process_loop
+    
+    ; Check if this is an empty statement (only whitespace/semicolon)
+    call check_empty_statement
+    cmp byte [empty_statement], 1
+    je .skip_empty_statement
+    
+    ; This is a top-level statement outside any block or parentheses
+    call print_current_statement
+    call clear_stmt_buffer
+    mov byte [stmt_started], 0
+    
+    ; Get new color for next statement
+    call get_next_color
+    
+    jmp .process_loop
+
+.skip_empty_statement:
+    ; Skip printing empty statement
+    call clear_stmt_buffer
+    mov byte [stmt_started], 0
+    mov byte [empty_statement], 0
+    jmp .process_loop
+
+.process_done:
+    ; Print any remaining statement (but check if it's empty)
+    mov rsi, current_stmt
+    call string_length
+    test rax, rax
+    jz .done
+    
+    call check_empty_statement
+    cmp byte [empty_statement], 1
+    je .skip_final_empty
+    
+    call print_current_statement
+    jmp .done
+
+.skip_final_empty:
+    ; Don't print empty final statement
+
+.done:
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; CHECK EMPTY STATEMENT - Checks if statement contains only whitespace/semicolon
+; ------------------------------------------------------------
+check_empty_statement:
+    push rsi
+    push rcx
+    
+    mov byte [empty_statement], 1  ; Assume empty by default
+    
+    mov rsi, current_stmt
+.check_loop:
+    mov al, [rsi]
+    cmp al, 0
+    je .done_check
+    
+    ; If we find any non-whitespace character that's not a semicolon,
+    ; then the statement is not empty
+    cmp al, ' '
+    je .next_char
+    cmp al, 9      ; Tab
+    je .next_char
+    cmp al, 10     ; Newline
+    je .next_char
+    cmp al, 13     ; Carriage return
+    je .next_char
+    cmp al, ';'
+    je .next_char
+    
+    ; Found non-whitespace content
+    mov byte [empty_statement], 0
+    jmp .done_check
+
+.next_char:
+    inc rsi
+    jmp .check_loop
+
+.done_check:
+    pop rcx
+    pop rsi
+    ret
+
+; ------------------------------------------------------------
+; PRINT CURRENT STATEMENT - Prints with proper formatting and alternating colors
+; Now includes <js-start> and <js-end> tags with matching colors
+; ------------------------------------------------------------
+print_current_statement:
+    push rbx
+    push rsi
+    push rdi
+    push rcx
+    
+    ; Check if statement is empty
+    mov rsi, current_stmt
+    call string_length
+    test rax, rax
+    jz .done
+    
+    ; Trim trailing spaces
+    call trim_trailing_spaces
+    
+    ; Use current color for both tags and content
+    mov rbx, [current_color]
+    
+    ; Print opening tag with current color
+    mov rsi, rbx
+    call print_string
+    
+    mov rsi, js_start_tag
+    call print_string
+    
+    ; Reset color after opening tag
+    mov rsi, reset_color_str
+    call print_string
+    
+    ; Print a space after opening tag for readability
+    mov rsi, tab
+    call print_string
+    
+    ; Print statement content with current color
+    mov rsi, rbx
+    call print_string
+    
+    mov rsi, current_stmt
+    call print_string
+    
+    ; Reset color before closing tag
+    mov rsi, reset_color_str
+    call print_string
+    
+    ; Print a space before closing tag for readability
+    mov rsi, tab
+    call print_string
+    
+    ; Print closing tag with current color
+    mov rsi, rbx
+    call print_string
+    
+    mov rsi, js_end_tag
+    call print_string
+    
+    ; Reset color (closing tag already has newline)
+    mov rsi, reset_color_str
+    call print_string
+
+.done:
+    pop rcx
+    pop rdi
+    pop rsi
+    pop rbx
+    ret
+
+; ------------------------------------------------------------
+; TRIM TRAILING SPACES - Removes spaces from end of statement
+; ------------------------------------------------------------
+trim_trailing_spaces:
+    push rdi
+    push rsi
+    push rcx
+    
+    mov rdi, current_stmt
+    call string_length
+    test rax, rax
+    jz .done
+    
+    mov rsi, current_stmt
+    add rsi, rax
+    dec rsi
+
+.trim_loop:
+    cmp rsi, current_stmt
+    jl .done
+    
+    mov al, [rsi]
+    cmp al, ' '
+    je .remove_space
+    cmp al, 9      ; Tab
+    je .remove_space
+    jmp .done
+
+.remove_space:
+    mov byte [rsi], 0
+    dec rsi
+    jmp .trim_loop
+
+.done:
+    pop rcx
+    pop rsi
+    pop rdi
+    ret
+
+; ------------------------------------------------------------
+; APPEND TO STATEMENT - Adds character to statement buffer (safe)
+; ------------------------------------------------------------
+append_to_stmt:
+    push rdi
+    push rcx
+    
+    ; Find end of current statement
+    mov rdi, current_stmt
+    xor rcx, rcx
+    
+    ; Limit to buffer size (1024)
+.find_end:
+    cmp rcx, 1023          ; Leave room for null terminator
+    jge .overflow
+    
+    cmp byte [rdi + rcx], 0
+    je .found_end
+    inc rcx
+    jmp .find_end
+
+.found_end:
+    ; Append character
+    mov al, [char_buffer]
+    mov [rdi + rcx], al
+    inc rcx
+    mov byte [rdi + rcx], 0
+
+.overflow:
+    pop rcx
+    pop rdi
+    ret
+
+; ------------------------------------------------------------
+; CLEAR STATEMENT BUFFER
+; ------------------------------------------------------------
+clear_stmt_buffer:
+    push rdi
+    push rcx
+    
+    mov rdi, current_stmt
+    mov rcx, 1024
+    xor al, al
+    
+    ; Use rep stosb for efficient clearing
+    rep stosb
+    
+.done:
+    pop rcx
+    pop rdi
+    ret
+
+; ------------------------------------------------------------
+; PRINTING FUNCTIONS (safe)
+; ------------------------------------------------------------
+print_string:
+    push rax
+    push rdi
+    push rdx
+    
+    ; Calculate string length
+    mov rdi, rsi            ; Save pointer
+    call string_length
+    mov rdx, rax            ; Length
+    mov rsi, rdi            ; Restore pointer
+    
+    ; Validate length
+    test rdx, rdx
+    jz .print_done
+    
+    ; sys_write
+    mov rax, 1              ; sys_write
+    mov rdi, 1              ; stdout
+    syscall
+
+.print_done:
+    pop rdx
+    pop rdi
+    pop rax
+    ret
+
+string_length:
+    push rbx
+    mov rbx, rsi
+    xor rax, rax
+
+.length_loop:
+    cmp byte [rbx + rax], 0
+    je .length_done
+    inc rax
+    jmp .length_loop
+
+.length_done:
+    pop rbx
+    ret

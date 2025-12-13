@@ -16,10 +16,6 @@ section .data
 section .text
     global _start
 
-; ========== CLEAN MINIFIER IMPLEMENTATION ==========
-; This minifier only removes whitespace and comments
-; No hidden functionality or backdoors
-
 _start:
     ; Validate command line arguments
     pop rcx                     ; argc
@@ -78,15 +74,16 @@ _start:
     mov r10, rax                ; Save output file descriptor
     
     ; ========== MINIFIER LOGIC ==========
-    ; Preserves all code functionality while removing whitespace/comments
     mov rsi, input_buffer       ; Source pointer
     mov rdi, output_buffer      ; Destination pointer
     mov rcx, r9                 ; Input length
     
-    ; State tracking (clean implementation)
+    ; State tracking
     xor r11, r11                ; String state: 0=none, 1=', 2=", 3=`
     xor r12, r12                ; Comment state: 0=none, 1=//, 2=/* */
     xor r13, r13                ; Escape next char flag
+    xor r14, r14                ; Last non-whitespace char
+    xor r15, r15                ; Brace depth (0 = not in object/array)
     
 .minify_loop:
     test rcx, rcx
@@ -94,7 +91,7 @@ _start:
     
     mov al, [rsi]
     
-    ; Handle comments first (comments don't start inside strings)
+    ; Handle comments first
     test r12, r12
     jnz .in_comment
     
@@ -102,7 +99,7 @@ _start:
     test r11, r11
     jnz .in_string
     
-    ; Not in string or comment - check for special characters
+    ; Not in string or comment
     cmp al, "'"
     je .start_string_single
     cmp al, '"'
@@ -112,41 +109,60 @@ _start:
     cmp al, '/'
     je .possible_comment
     
-    ; Handle whitespace removal
-    call .is_whitespace
-    jc .remove_whitespace
+    ; Update brace depth tracking
+    cmp al, '{'
+    je .increase_brace_depth
+    cmp al, '}'
+    je .decrease_brace_depth
+    cmp al, '['
+    je .increase_brace_depth
+    cmp al, ']'
+    je .decrease_brace_depth
     
-    ; Keep all other characters
+    ; Handle whitespace
+    call .is_whitespace
+    jc .handle_whitespace
+    
+    ; Handle regular character
     mov [rdi], al
     inc rdi
+    
+    ; Check if we need semicolon before this character
+    mov bl, al
+    mov r14, rbx                ; Save last char
+    
     jmp .next_char
 
-.remove_whitespace:
-    ; Special handling for spaces between identifiers
-    cmp al, ' '
-    jne .skip_char              ; Non-space whitespace always removed
+.handle_whitespace:
+    ; Check what type of whitespace
+    cmp al, 0x0A                ; Newline
+    je .handle_newline
+    cmp al, 0x0D                ; Carriage return
+    je .handle_newline
     
-    ; Check if space should be kept (between alnum characters)
+    ; For spaces/tabs
+    cmp al, ' '
+    jne .skip_char
+    
+    ; Keep space between identifiers
     cmp rsi, input_buffer
-    je .skip_char               ; Can't be first char
+    je .skip_char
     
     cmp rcx, 1
-    je .skip_char               ; Can't be last char
+    je .skip_char
     
-    ; Check if space separates identifiers
     mov bl, [rsi - 1]
     mov dl, [rsi + 1]
     
     call .is_identifier_char
-    jnc .skip_char              ; Left not identifier
+    jnc .skip_char
     
     push rbx
     mov bl, dl
     call .is_identifier_char
     pop rbx
-    jnc .skip_char              ; Right not identifier
+    jnc .skip_char
     
-    ; Keep space between identifiers
     mov byte [rdi], ' '
     inc rdi
     
@@ -154,6 +170,62 @@ _start:
     inc rsi
     dec rcx
     jmp .minify_loop
+
+.handle_newline:
+    ; Check if we need semicolon at newline
+    test r14, r14
+    jz .skip_char                ; No last char
+    
+    ; Don't add semicolons inside object/array literals
+    test r15, r15
+    jnz .skip_char               ; Inside object/array
+    
+    ; Check last character to see if we need semicolon
+    mov bl, r14b
+    
+    ; If last char was } ) ] " ' ` or identifier, we might need semicolon
+    cmp bl, '}'
+    je .maybe_add_semicolon
+    cmp bl, ')'
+    je .maybe_add_semicolon
+    cmp bl, ']'
+    je .maybe_add_semicolon
+    cmp bl, '"'
+    je .maybe_add_semicolon
+    cmp bl, "'"
+    je .maybe_add_semicolon
+    cmp bl, '`'
+    je .maybe_add_semicolon
+    
+    ; Check if last char was identifier char
+    call .is_identifier_char
+    jc .maybe_add_semicolon
+    
+    jmp .skip_char
+
+.maybe_add_semicolon:
+    ; Don't add if already has semicolon
+    cmp rdi, output_buffer
+    je .skip_char
+    
+    mov dl, [rdi - 1]
+    cmp dl, ';'
+    je .skip_char
+    cmp dl, '{'
+    je .skip_char
+    
+    ; Insert semicolon
+    mov byte [rdi], ';'
+    inc rdi
+    jmp .skip_char
+
+.increase_brace_depth:
+    inc r15
+    jmp .copy_char
+
+.decrease_brace_depth:
+    dec r15
+    jmp .copy_char
 
 .start_string_single:
     mov r11, 1
@@ -170,21 +242,20 @@ _start:
 .copy_char:
     mov [rdi], al
     inc rdi
+    mov r14, rax                ; Save last char
     jmp .next_char
 
 .in_string:
-    ; Copy string content
     mov [rdi], al
     inc rdi
+    mov r14, rax                ; Save last char
     
-    ; Handle escape sequences
     cmp r13, 1
     je .reset_escape
     
     cmp al, '\'
     je .set_escape
     
-    ; Check for string termination
     cmp r11, 1
     je .check_single_quote
     cmp r11, 2
@@ -197,19 +268,19 @@ _start:
 .check_single_quote:
     cmp al, "'"
     jne .next_char
-    mov r11, 0
+    xor r11, r11
     jmp .next_char
 
 .check_double_quote:
     cmp al, '"'
     jne .next_char
-    mov r11, 0
+    xor r11, r11
     jmp .next_char
 
 .check_backtick:
     cmp al, '`'
     jne .next_char
-    mov r11, 0
+    xor r11, r11
     jmp .next_char
 
 .set_escape:
@@ -222,7 +293,7 @@ _start:
 
 .possible_comment:
     cmp rcx, 1
-    je .copy_char              ; Last character, can't start comment
+    je .copy_char
     
     mov bl, [rsi + 1]
     cmp bl, '/'
@@ -230,18 +301,20 @@ _start:
     cmp bl, '*'
     je .start_block_comment
     
-    ; Not a comment - just a slash
     mov [rdi], al
     inc rdi
+    mov r14, rax                ; Save last char
     jmp .next_char
 
 .start_line_comment:
+    xor r14, r14                ; Reset last char for comment
     mov r12, 1
     add rsi, 2
     sub rcx, 2
     jmp .minify_loop
 
 .start_block_comment:
+    xor r14, r14                ; Reset last char for comment
     mov r12, 2
     add rsi, 2
     sub rcx, 2
@@ -255,9 +328,9 @@ _start:
     jmp .next_char
 
 .line_comment:
-    cmp al, 0x0A                ; Newline ends line comment
+    cmp al, 0x0A
     jne .skip_comment_char
-    mov r12, 0
+    xor r12, r12
 .skip_comment_char:
     inc rsi
     dec rcx
@@ -271,8 +344,7 @@ _start:
     mov bl, [rsi + 1]
     cmp bl, '/'
     jne .skip_comment_char
-    ; End block comment
-    mov r12, 0
+    xor r12, r12
     add rsi, 2
     sub rcx, 2
     jmp .minify_loop
@@ -283,14 +355,14 @@ _start:
     jmp .minify_loop
 
 .minify_done:
-    ; Calculate output length safely
+    ; Calculate output length
     mov r11, rdi
     lea rdi, [output_buffer]
-    sub r11, rdi                ; r11 = output length
+    sub r11, rdi
     
     ; Write output file
-    mov rax, 1                  ; sys_write
-    mov rdi, r10                ; output fd
+    mov rax, 1
+    mov rdi, r10
     mov rsi, output_buffer
     mov rdx, r11
     syscall
@@ -298,26 +370,25 @@ _start:
     jl .error_write
     
     ; Close output file
-    mov rax, 3                  ; sys_close
+    mov rax, 3
     mov rdi, r10
     syscall
     
     ; Clean exit
-    mov rax, 60                 ; sys_exit
-    xor rdi, rdi                ; exit code 0
+    mov rax, 60
+    xor rdi, rdi
     syscall
 
 ; ========== HELPER FUNCTIONS ==========
 
-; Check if character in al is whitespace
 .is_whitespace:
     cmp al, ' '
     je .is_ws_yes
-    cmp al, 0x09                ; Tab
+    cmp al, 0x09
     je .is_ws_yes
-    cmp al, 0x0A                ; Newline
+    cmp al, 0x0A
     je .is_ws_yes
-    cmp al, 0x0D                ; Carriage return
+    cmp al, 0x0D
     je .is_ws_yes
     clc
     ret
@@ -325,24 +396,22 @@ _start:
     stc
     ret
 
-; Check if character in bl is valid identifier character
 .is_identifier_char:
-    ; Allow letters, digits, underscore, dollar sign
     cmp bl, '0'
-    jb .check_special_id_start
+    jb .check_letters
     cmp bl, '9'
     jbe .is_id_yes
-.check_special_id_start:
+.check_letters:
     cmp bl, 'A'
-    jb .check_more_special
+    jb .check_lower
     cmp bl, 'Z'
     jbe .is_id_yes
-.check_more_special:
+.check_lower:
     cmp bl, 'a'
-    jb .check_underscore
+    jb .check_special
     cmp bl, 'z'
     jbe .is_id_yes
-.check_underscore:
+.check_special:
     cmp bl, '_'
     je .is_id_yes
     cmp bl, '$'
@@ -395,6 +464,6 @@ _start:
     jmp .exit_with_error
 
 .exit_with_error:
-    mov rax, 60                 ; sys_exit
-    mov rdi, 1                  ; Non-zero exit code
+    mov rax, 60
+    mov rdi, 1
     syscall

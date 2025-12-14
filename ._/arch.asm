@@ -16,11 +16,16 @@ section .data
     err_no_file       db "Error: No input file specified.", 10, 0
     err_open          db "Error: Could not open file.", 10, 0
     err_read          db "Error: Could not read file.", 10, 0
+    err_create        db "Error: Could not create output file.", 10, 0
+    err_write         db "Error: Could not write to output file.", 10, 0
     
     ; Output formatting
     newline           db 10, 0
     tab               db "    ", 0
     chain_tab         db "    ", 0    ; Tab for chain content
+    
+    ; Output filename
+    output_filename   db "arch_output", 0
     
     ; State tracking
     in_string         db 0
@@ -63,8 +68,13 @@ section .data
     chain_stack       times 16 dq 0  ; Stores chain colors
     chain_brace_stack times 16 dd 0  ; Stores brace depth when chain started
 
+    ; Buffer for clean output (no color codes)
+    clean_buffer      times 2048 db 0
+    clean_pos         dq 0
+
 section .bss
     file_handle       resq 1
+    output_handle     resq 1
     file_size         resq 1
     file_buffer       resb 65536
     chain_depth       resd 1
@@ -84,6 +94,7 @@ _start:
     pop rdi
     pop rdi
     
+    ; Open input file
     mov rax, 2
     mov rsi, 0
     mov rdx, 0
@@ -92,6 +103,7 @@ _start:
     jl .error_open
     mov [file_handle], rax
     
+    ; Get file size
     mov rax, 8
     mov rdi, [file_handle]
     mov rsi, 0
@@ -101,6 +113,7 @@ _start:
     jl .error_read
     mov [file_size], rax
     
+    ; Seek back to start
     mov rax, 8
     mov rdi, [file_handle]
     mov rsi, 0
@@ -110,6 +123,7 @@ _start:
     cmp qword [file_size], 65536
     jg .error_read
     
+    ; Read file
     mov rax, 0
     mov rdi, [file_handle]
     mov rsi, file_buffer
@@ -118,11 +132,33 @@ _start:
     cmp rax, 0
     jl .error_read
     
+    ; Close input file
     mov rax, 3
     mov rdi, [file_handle]
     syscall
     
+    ; Create output file (overwrite if exists)
+    ; Use decimal flags for clarity: O_CREAT=0x40, O_WRONLY=0x1, O_TRUNC=0x200
+    mov rax, 2                    ; sys_open
+    mov rdi, output_filename      ; filename
+    mov rsi, 0x241                ; O_CREAT|O_WRONLY|O_TRUNC = 0x40|0x1|0x200 = 0x241
+    mov rdx, 0644q                ; rw-r--r-- permissions in octal
+    syscall
+    cmp rax, 0
+    jl .error_create
+    mov [output_handle], rax
+    
+    ; Process file
     call process_file
+    
+    ; Ensure all data is written to file
+    call write_to_file
+    
+    ; Close output file
+    mov rax, 3
+    mov rdi, [output_handle]
+    syscall
+    
     jmp .exit_success
 
 .error_no_file:
@@ -141,6 +177,18 @@ _start:
     mov rsi, err_read
     call print_string
     mov rdi, 3
+    jmp .exit_now
+
+.error_create:
+    mov rsi, err_create
+    call print_string
+    mov rdi, 4
+    jmp .exit_now
+
+.error_write:
+    mov rsi, err_write
+    call print_string
+    mov rdi, 5
 
 .exit_success:
     mov rdi, 0
@@ -182,6 +230,140 @@ get_chain_color:
     ret
 
 ; ------------------------------------------------------------
+; WRITE TO FILE - Write clean buffer to output file
+; ------------------------------------------------------------
+write_to_file:
+    push rax
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    
+    ; Check if there's anything to write
+    mov rcx, [clean_pos]
+    test rcx, rcx
+    jz .write_done
+    
+    ; Write to file
+    mov rax, 1                    ; sys_write
+    mov rdi, [output_handle]
+    lea rsi, [clean_buffer]
+    mov rdx, rcx
+    syscall
+    cmp rax, 0
+    jl .write_error
+    
+    ; Reset buffer
+    mov qword [clean_pos], 0
+    mov byte [clean_buffer], 0
+    
+.write_done:
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rax
+    ret
+
+.write_error:
+    ; Clean up and exit on write error
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rax
+    mov rdi, 5
+    jmp _start.exit_now
+
+; ------------------------------------------------------------
+; APPEND TO CLEAN BUFFER - Add string without color codes
+; ------------------------------------------------------------
+append_to_clean_buffer:
+    push rsi
+    push rdi
+    push rcx
+    push rax
+    
+    mov rsi, rdi          ; Source string
+    mov rdi, clean_buffer
+    add rdi, [clean_pos]
+    
+.copy_loop:
+    mov al, [rsi]
+    test al, al
+    jz .copy_done
+    
+    ; Store character
+    mov [rdi], al
+    inc rsi
+    inc rdi
+    inc qword [clean_pos]
+    
+    ; Check buffer size
+    mov rax, [clean_pos]
+    cmp rax, 2047
+    jl .copy_loop
+    
+    ; Buffer full, write to file
+    call write_to_file
+    
+    ; Reset for next copy
+    mov rdi, clean_buffer
+    add rdi, [clean_pos]
+    jmp .copy_loop
+
+.copy_done:
+    pop rax
+    pop rcx
+    pop rdi
+    pop rsi
+    ret
+
+; ------------------------------------------------------------
+; PRINT STRING WITH FILE OUTPUT - Terminal with colors, file without
+; ------------------------------------------------------------
+print_string:
+    push rax
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    
+    ; Save the string pointer
+    mov rdi, rsi
+    
+    ; Write to file (clean output) - only if not a color code
+    ; Check if this is a color escape sequence
+    cmp byte [rdi], 0x1B
+    je .skip_file_write  ; Skip writing color codes to file
+    
+    ; Write to file (clean output)
+    mov rsi, rdi
+    call append_to_clean_buffer
+    
+.skip_file_write:
+    ; Write to terminal (with colors)
+    mov rsi, rdi
+    call string_length
+    mov rdx, rax
+    mov rsi, rdi
+    
+    test rdx, rdx
+    jz .print_done
+    
+    mov rax, 1
+    mov rdi, 1
+    syscall
+
+.print_done:
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rax
+    ret
+
+; ------------------------------------------------------------
 ; PROCESS FILE - Main loop
 ; ------------------------------------------------------------
 process_file:
@@ -215,6 +397,7 @@ process_file:
     mov byte [in_block_stmt], 0
     mov byte [current_keyword], 0
     mov dword [color_index], 0
+    mov qword [clean_pos], 0
     
     ; Clear buffers
     call clear_stmt_buffer
@@ -437,6 +620,9 @@ process_file:
 .done_processing:
     ; Close any open chains (nested)
     call close_all_chains
+    
+    ; Write any remaining data to file
+    call write_to_file
     
     pop r13
     pop r12
@@ -1045,13 +1231,13 @@ print_current_statement:
     ; Get color
     mov rbx, [current_color]
     
-    ; Print opening tag
+    ; Print opening tag with color to terminal, without color to file
     mov rsi, rbx
     call print_string
     mov rsi, js_start_tag
     call print_string
     
-    ; Reset color
+    ; Reset color for terminal, nothing for file
     mov rsi, reset_color_str
     call print_string
     
@@ -1059,13 +1245,13 @@ print_current_statement:
     mov rsi, tab
     call print_string
     
-    ; Statement with color
+    ; Statement with color to terminal, without to file
     mov rsi, rbx
     call print_string
     mov rsi, current_stmt
     call print_string
     
-    ; Reset color
+    ; Reset color for terminal
     mov rsi, reset_color_str
     call print_string
     
@@ -1078,7 +1264,7 @@ print_current_statement:
     mov rsi, js_end_tag
     call print_string
     
-    ; Reset color
+    ; Reset color for terminal
     mov rsi, reset_color_str
     call print_string
 
@@ -1111,13 +1297,13 @@ print_chain_statement:
     mov rsi, chain_tab
     call print_string
     
-    ; Print as js statement
+    ; Print as js statement with color to terminal, without to file
     mov rsi, rbx
     call print_string
     mov rsi, js_start_tag
     call print_string
     
-    ; Reset color
+    ; Reset color for terminal
     mov rsi, reset_color_str
     call print_string
     
@@ -1125,13 +1311,13 @@ print_chain_statement:
     mov rsi, tab
     call print_string
     
-    ; Statement with color
+    ; Statement with color to terminal, without to file
     mov rsi, rbx
     call print_string
     mov rsi, current_stmt
     call print_string
     
-    ; Reset color
+    ; Reset color for terminal
     mov rsi, reset_color_str
     call print_string
     
@@ -1144,7 +1330,7 @@ print_chain_statement:
     mov rsi, js_end_tag
     call print_string
     
-    ; Reset color
+    ; Reset color for terminal
     mov rsi, reset_color_str
     call print_string
 
@@ -1368,29 +1554,6 @@ trim_trailing_spaces:
 .trim_done:
     pop rsi
     pop rdi
-    ret
-
-print_string:
-    push rax
-    push rdi
-    push rdx
-    
-    mov rdi, rsi
-    call string_length
-    mov rdx, rax
-    mov rsi, rdi
-    
-    test rdx, rdx
-    jz .print_done
-    
-    mov rax, 1
-    mov rdi, 1
-    syscall
-
-.print_done:
-    pop rdx
-    pop rdi
-    pop rax
     ret
 
 string_length:

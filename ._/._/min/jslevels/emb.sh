@@ -1,29 +1,26 @@
 #!/bin/bash
 
-set -e
 
-# Check if a file was provided
-if [ $# -eq 0 ]; then
-    echo "Usage: $0 <javascript-file.js>"
-    echo "Creates a self-extracting shell script that recreates the JS file"
-    exit 1
-fi
+# Function to process a single JavaScript file
+process_file() {
+    local input_file="$1"
+    
+    # Check if the file exists
+    if [ ! -f "$input_file" ]; then
+        echo "Error: File '$input_file' does not exist"
+        return 1
+    fi
 
-# Check if the file exists
-input_file="$1"
-if [ ! -f "$input_file" ]; then
-    echo "Error: File '$input_file' does not exist"
-    exit 1
-fi
+    # Get the base filename (without path)
+    local filename=$(basename "$input_file")
+    
+    # Create the output shell script name (same name as .js but with .sh extension)
+    local output_script="${filename%.*}.sh"
 
-# Get the base filename
-filename=$(basename "$input_file")
+    echo "Processing: $filename"
 
-# Create the output shell script name (same name as .js but with .sh extension)
-output_script="${filename%.*}.sh"
-
-# Create the self-extracting shell script
-cat > "$output_script" << 'EOF'
+    # Create the self-extracting shell script
+    if ! cat > "$output_script" << 'EOF'
 #!/bin/bash
 
 # Self-extracting JavaScript file generator
@@ -78,19 +75,84 @@ exit 0
 
 #===BEGIN_BASE64_DATA===
 EOF
+    then
+        echo "Error: Failed to create script template for $filename"
+        return 1
+    fi
 
-# Encode the file in base64 and append it
-base64 "$input_file" >> "$output_script"
+    # Encode the file in base64 and append it
+    if ! base64 "$input_file" >> "$output_script"; then
+        echo "Error: Failed to encode $filename to base64"
+        rm -f "$output_script"  # Clean up partial file
+        return 1
+    fi
 
-# Make the generated script executable
-chmod +x "$output_script"
+    # Make the generated script executable
+    if ! chmod +x "$output_script"; then
+        echo "Error: Failed to make $output_script executable"
+        return 1
+    fi
 
-echo "Created self-extracting script: $output_script"
-echo "Original file: $input_file ($(wc -c < "$input_file") bytes)"
-echo ""
-echo "To extract: ./$output_script"
-echo "This will create/overwrite: ${filename%.*}.js"
-echo ""
-echo "Quick test:"
-echo "  ./$output_script"
-echo "  diff $input_file ${filename%.*}.js"
+    echo "  Created self-extracting script: $output_script"
+    echo "  Original file: $filename ($(wc -c < "$input_file") bytes)"
+    echo ""
+    return 0
+}
+
+# Check if an argument was provided
+if [ $# -eq 0 ]; then
+    echo "Usage: $0 <javascript-file.js> [javascript-file2.js ...]"
+    echo "       $0 <directory>"
+    exit 1
+fi
+
+# Process all arguments WITHOUT set -e at the top level
+processed_count=0
+for arg in "$@"; do
+    echo "Processing argument: '$arg'"
+    
+    if [ -d "$arg" ]; then
+        echo "Argument is a directory"
+        echo "Processing all .js files in directory: $arg"
+        echo "=============================================="
+        
+        # Get the absolute path
+        if [ "$arg" = "." ]; then
+            dir_path="$(pwd)"
+        else
+            dir_path="$(cd "$arg" && pwd)"
+        fi
+        
+        echo "Directory path: $dir_path"
+        
+        # Use a simple for loop without process substitution
+        shopt -s nullglob  # Make globs return empty if no matches
+        for js_file in "$dir_path"/*.js; do
+            echo "Found file: $js_file"
+            if process_file "$js_file"; then
+                ((processed_count++))
+            else
+                echo "Failed to process: $js_file"
+            fi
+        done
+        shopt -u nullglob
+        
+    elif [ -f "$arg" ]; then
+        echo "Argument is a file"
+        if [[ "$arg" == *.js ]]; then
+            if process_file "$arg"; then
+                ((processed_count++))
+            else
+                echo "Failed to process: $arg"
+            fi
+        else
+            echo "Warning: '$arg' is not a .js file, skipping"
+        fi
+    else
+        echo "Warning: '$arg' is not a file or directory, skipping"
+    fi
+done
+
+echo "=============================================="
+echo "Processing complete!"
+echo "Total files processed: $processed_count"

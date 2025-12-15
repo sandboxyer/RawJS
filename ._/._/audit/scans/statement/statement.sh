@@ -1368,20 +1368,20 @@ run_tests() {
         echo ""
     done
     
-    # Summary
-    echo "========================================"
-    echo -e "${CYAN}Test Summary:${NC}"
-    echo -e "  Total tests:  $total_tests"
-    echo -e "  ${GREEN}Passed:        $passed_tests${NC}"
-    echo -e "  ${RED}Failed:        $failed_tests${NC}"
-    
-    if [ $total_tests -eq  ]; then
-        echo -e "${YELLOW}No test files found in '$TEST_DIR/'${NC}"
-        echo -e "${YELLOW}Consider running 'bash tests.sh' manually to regenerate test files.${NC}"
-        return 1
-    fi
-    
-    return 
+   # Summary
+echo "========================================"
+echo -e "${CYAN}Test Summary:${NC}"
+echo -e "  Total tests:  $total_tests"
+echo -e "  ${GREEN}Passed:        $passed_tests${NC}"
+echo -e "  ${RED}Failed:        $failed_tests${NC}"
+
+if [ $total_tests -eq 0 ]; then
+    echo -e "${YELLOW}No test files found in '$TEST_DIR/'${NC}"
+    echo -e "${YELLOW}Consider running 'bash tests.sh' manually to regenerate test files.${NC}"
+    return 1
+fi
+
+return
 }
 
 # Main execution

@@ -1101,11 +1101,30 @@ run_tests() {
     echo -e "${BLUE}Running JavaScript Token Error Test Suite${NC}"
     echo "========================================"
     
-    # Check if test directory exists
+    # Check if test directory exists, if not run tests.sh to generate it
     if [ ! -d "$TEST_DIR" ]; then
         echo -e "${YELLOW}Test directory '$TEST_DIR' not found.${NC}"
-        echo -e "${YELLOW}Please create test files in '$TEST_DIR/' directory first.${NC}"
-        return 1
+        echo -e "${CYAN}Attempting to generate test directory with tests.sh...${NC}"
+        
+        # Check if tests.sh exists in the current directory
+        if [ -f "tests.sh" ]; then
+            echo -e "${CYAN}Running tests.sh to generate test files...${NC}"
+            bash tests.sh
+            
+            # Check again if test directory was created
+            if [ -d "$TEST_DIR" ]; then
+                echo -e "${GREEN}Test directory successfully generated!${NC}"
+            else
+                echo -e "${RED}Failed to generate test directory. Please create test files manually.${NC}"
+                echo -e "${YELLOW}Expected directory: '$TEST_DIR/'${NC}"
+                return 1
+            fi
+        else
+            echo -e "${RED}tests.sh not found in current directory.${NC}"
+            echo -e "${YELLOW}Please ensure tests.sh exists in $(pwd)${NC}"
+            echo -e "${YELLOW}or create test files manually in '$TEST_DIR/' directory.${NC}"
+            return 1
+        fi
     fi
     
     local total_tests=0
@@ -1143,6 +1162,7 @@ run_tests() {
     
     if [ $total_tests -eq 0 ]; then
         echo -e "${YELLOW}No test files found in '$TEST_DIR/'${NC}"
+        echo -e "${YELLOW}Consider running 'bash tests.sh' manually to regenerate test files.${NC}"
         return 1
     fi
     

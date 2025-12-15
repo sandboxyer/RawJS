@@ -3,7 +3,7 @@
 # JavaScript Token Error Auditor - Pure Bash Implementation
 # Usage: ./basics.sh <filename.js> [--test]
 
-AUDIT_SCRIPT_VERSION="1.0.0"
+AUDIT_SCRIPT_VERSION="2.0.0"
 TEST_DIR="basics_tests"
 
 # Color codes for output
@@ -13,6 +13,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
+
+# Reserved JavaScript keywords
+RESERVED_WORDS="break case catch class const continue debugger default delete do else enum export extends false finally for function if import in instanceof new null return super switch this throw true try typeof var void while with yield let static implements interface package private protected public as async await get set from of"
 
 # Function to display usage
 show_usage() {
@@ -36,13 +39,115 @@ is_whitespace() {
     esac
 }
 
-# Function to check if character is valid for variable name
+# Function to check if character is valid for variable name (not first char)
 is_valid_var_char() {
     local char="$1"
     case "$char" in
-        [a-zA-Z0-9_$]) return 0 ;;
+        [a-zA-Z0-9_]) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# Function to check if character can start a variable name
+is_valid_var_start() {
+    local char="$1"
+    case "$char" in
+        [a-zA-Z_$]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Function to check if token is a reserved word
+is_reserved_word() {
+    local token="$1"
+    for word in $RESERVED_WORDS; do
+        if [ "$token" = "$word" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Function to check if token is a number
+is_number() {
+    local token="$1"
+    [[ "$token" =~ ^[0-9]+$ ]] || [[ "$token" =~ ^[0-9]+\.[0-9]*$ ]] || [[ "$token" =~ ^\.[0-9]+$ ]]
+}
+
+# Function to get token at position
+get_token() {
+    local line="$1"
+    local pos="$2"
+    local length=${#line}
+    local token=""
+    
+    # Skip whitespace
+    while [ $pos -lt $length ] && is_whitespace "${line:$pos:1}"; do
+        ((pos++))
+    done
+    
+    local start=$pos
+    
+    if [ $pos -lt $length ]; then
+        local char="${line:$pos:1}"
+        
+        # Handle different token types
+        case "$char" in
+            # Single character tokens
+            ';'|','|'.'|'('|')'|'{'|'}'|'['|']'|':'|'?'|'~'|'@'|'#'|'`')
+                token="$char"
+                ((pos++))
+                ;;
+            # Operators that could be multi-character
+            '+'|'-'|'*'|'/'|'%'|'&'|'|'|'^'|'!'|'='|'<'|'>')
+                token="$char"
+                ((pos++))
+                # Check for second character
+                if [ $pos -lt $length ]; then
+                    local next_char="${line:$pos:1}"
+                    case "${char}${next_char}" in
+                        '++'|'--'|'**'|'<<'|'>>'|'&&'|'||'|'=='|'!='|'<='|'>='|'+='|'-='|'*='|'/='|'%='|'&='|'|='|'^='|'??'|'?.')
+                            token="${char}${next_char}"
+                            ((pos++))
+                            ;;
+                    esac
+                fi
+                ;;
+            # Strings and chars
+            "'"|'"'|'`')
+                token="$char"
+                ((pos++))
+                # Skip to end of string (simplified)
+                while [ $pos -lt $length ] && [ "${line:$pos:1}" != "$char" ]; do
+                    # Handle escapes
+                    if [ "${line:$pos:1}" = "\\" ]; then
+                        ((pos++))
+                    fi
+                    ((pos++))
+                done
+                if [ $pos -lt $length ]; then
+                    ((pos++)) # Skip closing quote
+                fi
+                ;;
+            # Identifiers and numbers
+            *)
+                if is_valid_var_start "$char"; then
+                    while [ $pos -lt $length ] && (is_valid_var_char "${line:$pos:1}" || [ "${line:$pos:1}" = "$" ]); do
+                        ((pos++))
+                    done
+                elif [[ "$char" =~ [0-9] ]]; then
+                    while [ $pos -lt $length ] && ([[ "${line:$pos:1}" =~ [0-9] ]] || [ "${line:$pos:1}" = "." ] || [ "${line:$pos:1}" = "e" ] || [ "${line:$pos:1}" = "E" ]); do
+                        ((pos++))
+                    done
+                fi
+                ;;
+        esac
+        
+        token="${line:$start:$((pos-start))}"
+    fi
+    
+    echo "$token"
+    return $((pos-start))
 }
 
 # Function to check for token errors in JavaScript code
@@ -58,7 +163,10 @@ check_js_syntax() {
     local brace_count=0
     local bracket_count=0
     local paren_count=0
-    local last_char=""
+    local last_token=""
+    local last_non_ws_token=""
+    local expecting_expression=false
+    local expecting_operator=false
     
     # Read file line by line
     while IFS= read -r line || [ -n "$line" ]; do
@@ -71,31 +179,29 @@ check_js_syntax() {
             local char="${line:$col:1}"
             local next_char=""
             [ $((col+1)) -lt $line_length ] && next_char="${line:$((col+1)):1}"
-            local prev_char=""
-            [ $col -gt 0 ] && prev_char="${line:$((col-1)):1}"
             
             # Check for string/comment/regex contexts
             if ! $in_comment_single && ! $in_comment_multi; then
                 # Check for string/template literal start
-                if [ "$char" = "'" ] && ! $in_string_double && ! $in_template; then
+                if [ "$char" = "'" ] && ! $in_string_double && ! $in_template && ! $in_regex; then
                     if $in_string_single; then
                         in_string_single=false
                     else
                         in_string_single=true
                     fi
-                elif [ "$char" = '"' ] && ! $in_string_single && ! $in_template; then
+                elif [ "$char" = '"' ] && ! $in_string_single && ! $in_template && ! $in_regex; then
                     if $in_string_double; then
                         in_string_double=false
                     else
                         in_string_double=true
                     fi
-                elif [ "$char" = '`' ] && ! $in_string_single && ! $in_string_double; then
+                elif [ "$char" = '`' ] && ! $in_string_single && ! $in_string_double && ! $in_regex; then
                     if $in_template; then
                         in_template=false
                     else
                         in_template=true
                     fi
-                elif [ "$char" = '/' ] && ! $in_string_single && ! $in_string_double && ! $in_template && ! $in_regex; then
+                elif [ "$char" = '/' ] && ! $in_string_single && ! $in_string_double && ! $in_template; then
                     # Could be division, comment, or regex
                     if [ "$next_char" = '/' ]; then
                         in_comment_single=true
@@ -103,123 +209,257 @@ check_js_syntax() {
                     elif [ "$next_char" = '*' ]; then
                         in_comment_multi=true
                         ((col++))
-                    elif [ -z "$last_char" ] || \
-                         [ "$last_char" = "=" ] || \
-                         [ "$last_char" = "+" ] || \
-                         [ "$last_char" = "-" ] || \
-                         [ "$last_char" = "*" ] || \
-                         [ "$last_char" = "/" ] || \
-                         [ "$last_char" = "%" ] || \
-                         [ "$last_char" = "&" ] || \
-                         [ "$last_char" = "|" ] || \
-                         [ "$last_char" = "^" ] || \
-                         [ "$last_char" = "~" ] || \
-                         [ "$last_char" = "!" ] || \
-                         [ "$last_char" = "?" ] || \
-                         [ "$last_char" = ":" ] || \
-                         [ "$last_char" = "," ] || \
-                         [ "$last_char" = "(" ] || \
-                         [ "$last_char" = "[" ]; then
-                        in_regex=true
+                    elif ! $in_regex; then
+                        # Check if this could be a regex
+                        local is_regex=true
+                        
+                        # Regex can't follow certain tokens
+                        case "$last_non_ws_token" in
+                            ')'|']'|'++'|'--'|'identifier'|'number'|'string')
+                                is_regex=false
+                                ;;
+                            '}')
+                                # Could be object literal or block
+                                is_regex=false
+                                ;;
+                        esac
+                        
+                        if $is_regex; then
+                            in_regex=true
+                        fi
                     fi
-                elif [ "$char" = '*' ] && $in_comment_multi && [ "$next_char" = '/' ]; then
-                    in_comment_multi=false
-                    ((col++))
                 fi
-            else
-                # Inside comments
-                if $in_comment_single; then
-                    # Single line comment - skip to end of line
-                    break
-                elif $in_comment_multi && [ "$char" = '*' ] && [ "$next_char" = '/' ]; then
-                    in_comment_multi=false
-                    ((col++))
+            fi
+            
+            # Inside multi-line comment
+            if $in_comment_multi && [ "$char" = '*' ] && [ "$next_char" = '/' ]; then
+                in_comment_multi=false
+                ((col++))
+            fi
+            
+            # Inside regex - look for closing slash
+            if $in_regex && [ "$char" = '/' ]; then
+                # Check if slash isn't escaped
+                local is_escaped=false
+                local check_col=$((col-1))
+                while [ $check_col -ge 0 ] && [ "${line:$check_col:1}" = "\\" ]; do
+                    is_escaped=$(! $is_escaped)
+                    ((check_col--))
+                done
+                if ! $is_escaped; then
+                    in_regex=false
                 fi
             fi
             
             # Only check syntax if not inside string/comment/regex
             if ! $in_string_single && ! $in_string_double && ! $in_template && ! $in_comment_single && ! $in_comment_multi && ! $in_regex; then
-                # Check for unterminated constructs
-                case "$char" in
-                    '{') ((brace_count++)) ;;
-                    '}') ((brace_count--)) ;;
-                    '[') ((bracket_count++)) ;;
-                    ']') ((bracket_count--)) ;;
-                    '(') ((paren_count++)) ;;
-                    ')') ((paren_count--)) ;;
-                esac
+                # Get current token
+                local token
+                token_length=0
+                token=$(get_token "$line" $col)
+                token_length=${#token}
                 
-                # Check for specific token errors
-                # Check for lonely semicolon
-                if [ "$char" = ";" ]; then
-                    local is_lonely=true
+                if [ -n "$token" ] && [ "$token_length" -gt 0 ]; then
+                    # Update column position
+                    ((col += token_length - 1))
                     
-                    # Check if previous character is whitespace, semicolon, or brace
-                    if [ $col -gt 0 ]; then
-                        local before_char="${line:$((col-1)):1}"
-                        if [ "$before_char" = ";" ] || [ "$before_char" = "{" ] || [ "$before_char" = "}" ]; then
-                            is_lonely=true
-                        elif is_whitespace "$before_char"; then
-                            # Check what's before the whitespace
-                            local i=$((col-2))
-                            while [ $i -ge 0 ] && is_whitespace "${line:$i:1}"; do
-                                ((i--))
-                            done
-                            if [ $i -ge 0 ]; then
-                                local non_ws_char="${line:$i:1}"
-                                if [ "$non_ws_char" = ";" ] || [ "$non_ws_char" = "{" ] || [ "$non_ws_char" = "}" ]; then
-                                    is_lonely=true
-                                else
-                                    is_lonely=false
-                                fi
+                    # Check for specific token errors
+                    case "$token" in
+                        # Check for invalid variable declarations
+                        'const'|'let'|'var')
+                            if [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && \
+                               [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ] && \
+                               [ "$last_non_ws_token" != "(" ] && [ "$last_non_ws_token" != ")" ] && \
+                               [ "$last_non_ws_token" != ":" ] && [ "$last_non_ws_token" != "," ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Unexpected '$token'${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
                             fi
-                        else
-                            is_lonely=false
-                        fi
+                            ;;
+                            
+                        # Check for lonely semicolon (semicolon without preceding expression)
+                        ';')
+                            if [ "$last_non_ws_token" = "" ] || \
+                               [ "$last_non_ws_token" = ";" ] || \
+                               [ "$last_non_ws_token" = "{" ] || \
+                               [ "$last_non_ws_token" = "}" ] || \
+                               [ "$last_non_ws_token" = ":" ] && [ "$expecting_expression" = true ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Unexpected semicolon${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            expecting_expression=false
+                            expecting_operator=false
+                            ;;
+                            
+                        # Check for double commas or comma in wrong place
+                        ',')
+                            if [ "$last_non_ws_token" = "" ] || \
+                               [ "$last_non_ws_token" = "," ] || \
+                               [ "$last_non_ws_token" = "{" ] || \
+                               [ "$last_non_ws_token" = "[" ] || \
+                               [ "$last_non_ws_token" = "(" ] || \
+                               [ "$last_non_ws_token" = ";" ] || \
+                               [ "$last_non_ws_token" = ":" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Unexpected comma${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            expecting_expression=true
+                            expecting_operator=false
+                            ;;
+                            
+                        # Check for invalid spread operator usage
+                        '...')
+                            if [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != "{" ] && \
+                               [ "$last_non_ws_token" != "[" ] && [ "$last_non_ws_token" != "," ] && \
+                               [ "$last_non_ws_token" != "(" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid spread operator${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            ;;
+                            
+                        # Check for invalid operators
+                        '++'|'--')
+                            # Check if these are used as prefix/postfix correctly
+                            if [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && \
+                               [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ] && \
+                               [ "$last_non_ws_token" != "(" ] && [ "$last_non_ws_token" != ")" ] && \
+                               [ "$last_non_ws_token" != "[" ] && [ "$last_non_ws_token" != "]" ] && \
+                               [ "$last_non_ws_token" != "," ] && [ "$last_non_ws_token" != "=" ] && \
+                               [ "$last_non_ws_token" != "+" ] && [ "$last_non_ws_token" != "-" ] && \
+                               [ "$last_non_ws_token" != "*" ] && [ "$last_non_ws_token" != "/" ] && \
+                               [ "$last_non_ws_token" != "%" ]; then
+                                # Check if it's being used incorrectly (e.g., "5 ++")
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid use of '$token'${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            ;;
+                            
+                        # Check for incomplete exponent operator
+                        '**')
+                            if [ "$last_non_ws_token" = "" ] || [ "$expecting_operator" = true ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid exponent operator${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            expecting_expression=true
+                            ;;
+                            
+                        # Check for lonely dots
+                        '.')
+                            if [ "$last_non_ws_token" = "" ] || \
+                               [ "$last_non_ws_token" = "." ] || \
+                               [ "$last_non_ws_token" = ";" ] || \
+                               [ "$last_non_ws_token" = "{" ] || \
+                               [ "$last_non_ws_token" = "}" ] || \
+                               [ "$last_non_ws_token" = "(" ] || \
+                               [ "$last_non_ws_token" = ")" ] || \
+                               [ "$last_non_ws_token" = "[" ] || \
+                               [ "$last_non_ws_token" = "]" ] || \
+                               [ "$last_non_ws_token" = "," ] || \
+                               [ "$last_non_ws_token" = ":" ] || \
+                               [ "$last_non_ws_token" = "?" ] || \
+                               [ "$last_non_ws_token" = "=>" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Unexpected dot${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            ;;
+                            
+                        # Check for invalid optional chaining
+                        '?.')
+                            if [ "$last_non_ws_token" = "" ] || \
+                               [ "$last_non_ws_token" = ";" ] || \
+                               [ "$last_non_ws_token" = "{" ] || \
+                               [ "$last_non_ws_token" = "}" ] || \
+                               [ "$last_non_ws_token" = "(" ] || \
+                               [ "$last_non_ws_token" = ")" ] || \
+                               [ "$last_non_ws_token" = "[" ] || \
+                               [ "$last_non_ws_token" = "]" ] || \
+                               [ "$last_non_ws_token" = "," ] || \
+                               [ "$last_non_ws_token" = ":" ] || \
+                               [ "$last_non_ws_token" = "?" ] || \
+                               [ "$last_non_ws_token" = "=>" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid optional chaining${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            ;;
+                            
+                        # Check for reserved words as identifiers in wrong context
+                        *)
+                            # Check if token starts with a number
+                            if [[ "$token" =~ ^[0-9] ]] && \
+                               [ "$last_non_ws_token" = "const" ] || \
+                               [ "$last_non_ws_token" = "let" ] || \
+                               [ "$last_non_ws_token" = "var" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid variable name starting with number${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            
+                            # Check for invalid characters in identifiers
+                            if [[ "$token" =~ [@.#\-] ]] && \
+                               [ "$last_non_ws_token" = "const" ] || \
+                               [ "$last_non_ws_token" = "let" ] || \
+                               [ "$last_non_ws_token" = "var" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid character in variable name${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            
+                            # Check for reserved words as variable names
+                            if is_reserved_word "$token" && \
+                               [ "$last_non_ws_token" = "const" ] || \
+                               [ "$last_non_ws_token" = "let" ] || \
+                               [ "$last_non_ws_token" = "var" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Reserved word cannot be used as variable name${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            ;;
+                    esac
+                    
+                    # Update last non-whitespace token
+                    if [ "$token" != "" ]; then
+                        last_non_ws_token="$token"
                     fi
                     
-                    if $is_lonely; then
-                        echo -e "${RED}Error at line $line_number, column $((col+1)): Unexpected semicolon${NC}"
-                        echo "  $line"
-                        printf "%*s^%s\n" $col "" "${RED}here${NC}"
-                        echo "$(realpath "$filename")"
-                        return 1
-                    fi
+                    # Update bracket counts
+                    case "$token" in
+                        '{') ((brace_count++)) ;;
+                        '}') ((brace_count--)) ;;
+                        '[') ((bracket_count++)) ;;
+                        ']') ((bracket_count--)) ;;
+                        '(') ((paren_count++)) ;;
+                        ')') ((paren_count--)) ;;
+                    esac
                 fi
-                
-                # Check for double commas
-                if [ "$char" = "," ]; then
-                    if [ "$last_char" = "," ] || [ "$last_char" = "{" ] || [ "$last_char" = "[" ]; then
-                        echo -e "${RED}Error at line $line_number, column $((col+1)): Unexpected comma${NC}"
-                        echo "  $line"
-                        printf "%*s^%s\n" $col "" "${RED}here${NC}"
-                        echo "$(realpath "$filename")"
-                        return 1
-                    fi
-                fi
-                
-                # Check for invalid variable names starting with numbers
-                if [[ "$char" =~ [0-9] ]] && [ $col -eq 0 ] || [ $col -gt 0 ] && is_whitespace "$prev_char"; then
-                    # Check if this is a number followed by letters (invalid variable)
-                    local temp_col=$col
-                    local token=""
-                    while [ $temp_col -lt $line_length ] && is_valid_var_char "${line:$temp_col:1}"; do
-                        token="${token}${line:$temp_col:1}"
-                        ((temp_col++))
-                    done
-                    
-                    # Check if token starts with number and has letters after
-                    if [[ "$token" =~ ^[0-9]+[a-zA-Z_$] ]]; then
-                        echo -e "${RED}Error at line $line_number, column $((col+1)): Invalid variable name starting with number${NC}"
-                        echo "  $line"
-                        printf "%*s^%s\n" $col "" "${RED}starts here${NC}"
-                        echo "$(realpath "$filename")"
-                        return 1
-                    fi
-                fi
-                
-                # Update last_char
-                last_char="$char"
             fi
             
             ((col++))
@@ -229,7 +469,6 @@ check_js_syntax() {
         if $in_comment_single; then
             in_comment_single=false
         fi
-        last_char=""
         
     done < "$filename"
     

@@ -4,7 +4,7 @@
 # Pure Bash Implementation
 # Usage: ./statement.sh <filename.js> [--test]
 
-AUDIT_SCRIPT_VERSION="1.1.0"
+AUDIT_SCRIPT_VERSION="1.2.0"
 TEST_DIR="statement_tests"
 
 # Color codes for output
@@ -32,7 +32,7 @@ show_usage() {
 is_whitespace() {
     local char="$1"
     case "$char" in
-        ' '|$'\t'|$'\n'|$'\r') return 0 ;;
+        ' '|$'\t'|$'\n'|$'\r') return  ;;
         *) return 1 ;;
     esac
 }
@@ -41,7 +41,7 @@ is_whitespace() {
 is_valid_var_char() {
     local char="$1"
     case "$char" in
-        [a-zA-Z0-9_]) return 0 ;;
+        [a-zA-Z0-9_]) return  ;;
         *) return 1 ;;
     esac
 }
@@ -50,7 +50,7 @@ is_valid_var_char() {
 is_valid_var_start() {
     local char="$1"
     case "$char" in
-        [a-zA-Z_$]) return 0 ;;
+        [a-zA-Z_$]) return  ;;
         *) return 1 ;;
     esac
 }
@@ -199,19 +199,35 @@ peek_token() {
     fi
 }
 
+# Function to check if token is an operator
+is_operator() {
+    local token="$1"
+    case "$token" in
+        '+'|'-'|'*'|'/'|'%'|'&'|'|'|'^'|'!'|'~'|'<<'|'>>'|'>>>'|'**'|'&&'|'||'|'=='|'!='|'<='|'>='|'<'|'>'|'??'|'?.')
+            return 
+            ;;
+        '++'|'--')
+            return 
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # Function to check statement structure errors
 check_statement_errors() {
     local filename="$1"
-    local line_number=0
+    local line_number=
     local in_comment_single=false
     local in_comment_multi=false
     local in_string_single=false
     local in_string_double=false
     local in_template=false
     local in_regex=false
-    local brace_count=0
-    local bracket_count=0
-    local paren_count=0
+    local brace_count=
+    local bracket_count=
+    local paren_count=
     
     # Context tracking
     local in_function=false
@@ -261,10 +277,15 @@ check_statement_errors() {
     local destructuring_has_value=false
     local after_colon_in_object=false
     
+    # NEW: Track if we're inside an expression
+    local in_expression=false
+    local expression_operators=()
+    local last_was_operator=false
+    
     # Read file line by line
     while IFS= read -r line || [ -n "$line" ]; do
         ((line_number++))
-        local col=0
+        local col=
         local line_length=${#line}
         
         # Process each character
@@ -331,7 +352,7 @@ check_statement_errors() {
                 # Check if slash isn't escaped
                 local is_escaped=false
                 local check_col=$((col-1))
-                while [ $check_col -ge 0 ] && [ "${line:$check_col:1}" = "\\" ]; do
+                while [ $check_col -ge  ] && [ "${line:$check_col:1}" = "\\" ]; do
                     is_escaped=$(! $is_escaped)
                     ((check_col--))
                 done
@@ -344,11 +365,11 @@ check_statement_errors() {
             if ! $in_string_single && ! $in_string_double && ! $in_template && ! $in_comment_single && ! $in_comment_multi && ! $in_regex; then
                 # Get current token
                 local token
-                token_length=0
+                token_length=
                 token=$(get_token "$line" $col)
                 token_length=${#token}
                 
-                if [ -n "$token" ] && [ "$token_length" -gt 0 ]; then
+                if [ -n "$token" ] && [ "$token_length" -gt  ]; then
                     # Update column position
                     ((col += token_length - 1))
                     
@@ -436,15 +457,20 @@ check_statement_errors() {
                                 return 1
                             fi
                             
-                            # NEW: Check for invalid left-hand side in assignment
+                            # FIXED: Better check for invalid left-hand side in assignment (Test 5)
                             if ! $in_declaration && [ "$last_non_ws_token" != "" ]; then
-                                # Check if last token is a valid LHS
-                                if is_number "$last_non_ws_token" || is_string "$last_non_ws_token" || \
-                                   [ "$last_non_ws_token" = ")" ] || [ "$last_non_ws_token" = "]" ] || \
-                                   [ "$last_non_ws_token" = "++" ] || [ "$last_non_ws_token" = "--" ] || \
-                                   [ "$last_non_ws_token" = "+" ] || [ "$last_non_ws_token" = "-" ] || \
-                                   [ "$last_non_ws_token" = "*" ] || [ "$last_non_ws_token" = "/" ] || \
-                                   [ "$last_non_ws_token" = "%" ]; then
+                                # Check if last token was an operator or expression
+                                if is_operator "$last_non_ws_token" || $last_was_operator || \
+                                   [ "$last_non_ws_token" = ")" ] || [ "$last_non_ws_token" = "]" ]; then
+                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid left-hand side in assignment${NC}"
+                                    echo "  $line"
+                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                    echo "$(realpath "$filename")"
+                                    return 1
+                                fi
+                                
+                                # Also check if we're in an expression context
+                                if $in_expression && [ ${#expression_operators[@]} -gt  ]; then
                                     echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid left-hand side in assignment${NC}"
                                     echo "  $line"
                                     printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
@@ -480,6 +506,9 @@ check_statement_errors() {
                             expecting_expression=true
                             expecting_operator=false
                             in_assignment=true
+                            in_expression=false  # Reset expression tracking
+                            expression_operators=()
+                            last_was_operator=false
                             ;;
                             
                         # Check for empty parentheses in control structures
@@ -498,7 +527,7 @@ check_statement_errors() {
                                         ((depth++))
                                     elif [ "$next_char" = ')' ]; then
                                         ((depth--))
-                                        if [ $depth -eq 0 ]; then
+                                        if [ $depth -eq  ]; then
                                             break
                                         fi
                                     elif ! is_whitespace "$next_char"; then
@@ -666,10 +695,11 @@ check_statement_errors() {
                             export_has_value=false
                             
                             if [ "$token" = "export" ]; then
-                                # NEW: Check for export with literal value
+                                # FIXED: Better check for export errors
                                 local lookahead_col=$((col+1))
+                                local next_tok=""
                                 while [ $lookahead_col -lt $line_length ]; do
-                                    local next_tok=$(peek_token "$line" $lookahead_col)
+                                    next_tok=$(peek_token "$line" $lookahead_col)
                                     if [ "$next_tok" = ";" ]; then
                                         # Export without value
                                         echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Export declaration requires a value${NC}"
@@ -682,6 +712,18 @@ check_statement_errors() {
                                     fi
                                     ((lookahead_col++))
                                 done
+                                
+                                # Check if export is followed by a valid token
+                                if [ "$next_tok" = "let" ] || [ "$next_tok" = "const" ] || [ "$next_tok" = "var" ] || \
+                                   [ "$next_tok" = "function" ] || [ "$next_tok" = "class" ] || \
+                                   [ "$next_tok" = "{" ] || [ "$next_tok" = "*" ] || [ "$next_tok" = "default" ]; then
+                                    export_has_value=true
+                                else
+                                    # Might be exporting an identifier
+                                    if [[ "$next_tok" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]]; then
+                                        export_has_value=true
+                                    fi
+                                fi
                             fi
                             ;;
                             
@@ -823,9 +865,19 @@ check_statement_errors() {
                                 return 1
                             fi
                             
-                            # NEW: Check for const without initializer (Test 2)
+                            # FIXED: Check for export let without identifier (Test 31)
+                            if $in_import_export && [ "$import_export_type" = "export" ] && \
+                               [ "$declaration_type" = "let" ] && [ "$last_non_ws_token" = "let" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Missing identifier in export declaration${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            
+                            # Check for const without initializer
                             if $in_declaration && [ "$declaration_type" = "const" ] && \
-                               [[ "$last_non_ws_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]]; then
+                               [[ "$last_non_ws_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] && [ "$last_non_ws_token" != "=" ]; then
                                 echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Missing initializer in const declaration${NC}"
                                 echo "  $line"
                                 printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
@@ -833,7 +885,7 @@ check_statement_errors() {
                                 return 1
                             fi
                             
-                            # NEW: Check for import missing 'from' (Test 28)
+                            # Check for import missing 'from'
                             if $in_import_export && [ "$import_export_type" = "import" ] && ! $import_has_from; then
                                 echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Import declaration requires 'from' clause${NC}"
                                 echo "  $line"
@@ -842,12 +894,12 @@ check_statement_errors() {
                                 return 1
                             fi
                             
-                            # NEW: Check for export without value (Test 30)
+                            # Check for export without value
                             if $in_import_export && [ "$import_export_type" = "export" ] && ! $export_has_value; then
                                 # Check what was exported
                                 local lookback_col=$((col-token_length))
                                 local export_token=""
-                                while [ $lookback_col -ge 0 ]; do
+                                while [ $lookback_col -ge  ]; do
                                     local prev_tok=$(get_token "$line" $lookback_col)
                                     if [ "$prev_tok" = "export" ]; then
                                         # Check next token after export
@@ -878,12 +930,17 @@ check_statement_errors() {
                             import_has_specifier=false
                             export_has_value=false
                             in_assignment=false
+                            
+                            # Reset expression tracking
+                            in_expression=false
+                            expression_operators=()
+                            last_was_operator=false
                             ;;
                             
                         # Check for invalid commas
                         ',')
                             # Check for empty parameter in function
-                            if $in_function && [ "$paren_count" -gt 0 ] && [ "$last_non_ws_token" = "(" ] || [ "$last_non_ws_token" = "," ]; then
+                            if $in_function && [ "$paren_count" -gt  ] && [ "$last_non_ws_token" = "(" ] || [ "$last_non_ws_token" = "," ]; then
                                 echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Unexpected comma in parameter list${NC}"
                                 echo "  $line"
                                 printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
@@ -900,7 +957,7 @@ check_statement_errors() {
                                 return 1
                             fi
                             
-                            # NEW: Check for missing value in object destructuring after colon (Test 38)
+                            # Check for missing value in object destructuring after colon
                             if $after_colon_in_object; then
                                 echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Missing value in object destructuring${NC}"
                                 echo "  $line"
@@ -917,6 +974,16 @@ check_statement_errors() {
                                 # Mark that we expect a value after colon
                                 after_colon_in_object=true
                                 destructuring_has_value=false
+                            fi
+                            ;;
+                            
+                        # Handle operators (NEW: Track for Test 5)
+                        '+'|'-'|'*'|'/'|'%'|'&'|'|'|'^'|'!'|'~'|'<<'|'>>'|'>>>'|'**'|'&&'|'||'|'=='|'!='|'<='|'>='|'<'|'>'|'??'|'?.'|'++'|'--')
+                            if ! $in_declaration && ! $in_import_export && ! $in_assignment; then
+                                # We might be in an expression
+                                in_expression=true
+                                last_was_operator=true
+                                expression_operators+=("$token")
                             fi
                             ;;
                             
@@ -947,24 +1014,19 @@ check_statement_errors() {
                                 fi
                             fi
                             
-                            # NEW: Check for export let without identifier (Test 31)
-                            if $in_import_export && [ "$import_export_type" = "export" ] && \
-                               [ "$last_non_ws_token" = "let" ] && [ "$token" = ";" ]; then
-                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Missing identifier in export declaration${NC}"
-                                echo "  $line"
-                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                echo "$(realpath "$filename")"
-                                return 1
-                            fi
-                            
-                            # NEW: Mark that we have a value after colon in object destructuring
+                            # Mark that we have a value after colon in object destructuring
                             if $after_colon_in_object && [[ "$token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] || is_number "$token" || is_string "$token"; then
                                 after_colon_in_object=false
                                 destructuring_has_value=true
                             fi
                             
+                            # Reset operator tracking when we see a non-operator
+                            if $in_expression && ! is_operator "$token"; then
+                                last_was_operator=false
+                            fi
+                            
                             # Check for duplicate parameter names (simplified)
-                            if $in_function && [ "$paren_count" -gt 0 ] && [[ "$token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]]; then
+                            if $in_function && [ "$paren_count" -gt  ] && [[ "$token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]]; then
                                 # This would need more complex tracking
                                 :
                             fi
@@ -1011,7 +1073,7 @@ check_statement_errors() {
                             
                         '}')
                             ((brace_count--))
-                            # NEW: Check for missing value in object destructuring before closing brace (Test 38)
+                            # Check for missing value in object destructuring before closing brace
                             if $after_colon_in_object; then
                                 echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Missing value in object destructuring${NC}"
                                 echo "  $line"
@@ -1021,7 +1083,7 @@ check_statement_errors() {
                             fi
                             after_colon_in_object=false
                             
-                            if [ $brace_count -eq 0 ]; then
+                            if [ $brace_count -eq  ]; then
                                 # Reset contexts when exiting blocks
                                 if $in_function; then
                                     in_function=false
@@ -1053,7 +1115,7 @@ check_statement_errors() {
                             
                         ']')
                             ((bracket_count--))
-                            if [ $bracket_count -eq 0 ]; then
+                            if [ $bracket_count -eq  ]; then
                                 in_array_literal=false
                             fi
                             ;;
@@ -1069,7 +1131,7 @@ check_statement_errors() {
                             
                         ')')
                             ((paren_count--))
-                            if [ $paren_count -eq 0 ]; then
+                            if [ $paren_count -eq  ]; then
                                 in_destructuring=false
                                 destructuring_type=""
                             fi
@@ -1112,6 +1174,9 @@ check_statement_errors() {
                         '='|'+='|'-='|'*='|'/='|'%='|'&='|'|='|'^='|'<<='|'>>='|'>>>='|'**='|'&&='|'||='|'??=')
                             expecting_expression=true
                             expecting_operator=false
+                            in_expression=false
+                            expression_operators=()
+                            last_was_operator=false
                             ;;
                         '+'|'-'|'*'|'/'|'%'|'&'|'|'|'^'|'!'|'~'|'<<'|'>>'|'>>>'|'**'|'&&'|'||'|'??'|'?.')
                             expecting_expression=true
@@ -1125,6 +1190,9 @@ check_statement_errors() {
                             expecting_comma=false
                             expecting_semicolon=false
                             expecting_equals=false
+                            in_expression=false
+                            expression_operators=()
+                            last_was_operator=false
                             ;;
                     esac
                 fi
@@ -1175,37 +1243,37 @@ check_statement_errors() {
     fi
     
     # Check bracket/brace/paren counts
-    if [ $brace_count -gt 0 ]; then
+    if [ $brace_count -gt  ]; then
         echo -e "${RED}Error: Unclosed { (missing } )${NC}"
         echo "$(realpath "$filename")"
         return 1
-    elif [ $brace_count -lt 0 ]; then
+    elif [ $brace_count -lt  ]; then
         echo -e "${RED}Error: Unexpected } (extra closing brace)${NC}"
         echo "$(realpath "$filename")"
         return 1
     fi
     
-    if [ $bracket_count -gt 0 ]; then
+    if [ $bracket_count -gt  ]; then
         echo -e "${RED}Error: Unclosed [ (missing ] )${NC}"
         echo "$(realpath "$filename")"
         return 1
-    elif [ $bracket_count -lt 0 ]; then
+    elif [ $bracket_count -lt  ]; then
         echo -e "${RED}Error: Unexpected ] (extra closing bracket)${NC}"
         echo "$(realpath "$filename")"
         return 1
     fi
     
-    if [ $paren_count -gt 0 ]; then
+    if [ $paren_count -gt  ]; then
         echo -e "${RED}Error: Unclosed ( (missing ) )${NC}"
         echo "$(realpath "$filename")"
         return 1
-    elif [ $paren_count -lt 0 ]; then
+    elif [ $paren_count -lt  ]; then
         echo -e "${RED}Error: Unexpected ) (extra closing parenthesis)${NC}"
         echo "$(realpath "$filename")"
         return 1
     fi
     
-    return 0
+    return 
 }
 
 # Function to audit a single JavaScript file
@@ -1226,17 +1294,17 @@ audit_js_file() {
     
     # Check file size
     local file_size=$(wc -c < "$filename")
-    if [ $file_size -eq 0 ]; then
+    if [ $file_size -eq  ]; then
         echo -e "${GREEN}✓ Empty file - no errors${NC}"
         echo -e "${GREEN}PASS${NC}"
-        return 0
+        return 
     fi
     
     # Run our syntax checker
     if check_statement_errors "$filename"; then
         echo -e "${GREEN}✓ No statement structure errors found${NC}"
         echo -e "${GREEN}PASS${NC}"
-        return 0
+        return 
     else
         echo -e "${RED}FAIL${NC}"
         return 1
@@ -1274,9 +1342,9 @@ run_tests() {
         fi
     fi
     
-    local total_tests=0
-    local passed_tests=0
-    local failed_tests=0
+    local total_tests=
+    local passed_tests=
+    local failed_tests=
     
     echo -e "${CYAN}Test Results:${NC}"
     echo ""
@@ -1307,13 +1375,13 @@ run_tests() {
     echo -e "  ${GREEN}Passed:        $passed_tests${NC}"
     echo -e "  ${RED}Failed:        $failed_tests${NC}"
     
-    if [ $total_tests -eq 0 ]; then
+    if [ $total_tests -eq  ]; then
         echo -e "${YELLOW}No test files found in '$TEST_DIR/'${NC}"
         echo -e "${YELLOW}Consider running 'bash tests.sh' manually to regenerate test files.${NC}"
         return 1
     fi
     
-    return 0
+    return 
 }
 
 # Main execution
@@ -1321,7 +1389,7 @@ main() {
     # Check for help flag
     if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
         show_usage
-        exit 0
+        exit 
     fi
     
     # Check for test mode
@@ -1331,7 +1399,7 @@ main() {
     fi
     
     # Check if filename is provided
-    if [ $# -eq 0 ]; then
+    if [ $# -eq  ]; then
         echo -e "${RED}Error: No filename provided${NC}"
         show_usage
         exit 1

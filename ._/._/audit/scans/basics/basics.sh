@@ -3,7 +3,7 @@
 # JavaScript Token Error Auditor - Pure Bash Implementation
 # Usage: ./basics.sh <filename.js> [--test]
 
-AUDIT_SCRIPT_VERSION="2.1.0"
+AUDIT_SCRIPT_VERSION="2.2.0"
 TEST_DIR="basics_tests"
 
 # Color codes for output
@@ -175,6 +175,8 @@ check_js_syntax() {
     local in_generator=false
     local in_try_block=false
     local case_default_seen=false
+    local last_was_question=false  # Track if last token was '?'
+    local in_arrow_params=false    # Track arrow function parameters
     
     # Read file line by line
     while IFS= read -r line || [ -n "$line" ]; do
@@ -310,7 +312,7 @@ check_js_syntax() {
                                [ "$last_non_ws_token" = ";" ] || \
                                [ "$last_non_ws_token" = "{" ] || \
                                [ "$last_non_ws_token" = "}" ] || \
-                               [ "$last_non_ws_token" = ":" ] && [ "$expecting_expression" = true ]; then
+                               ([ "$last_non_ws_token" = ":" ] && [ "$expecting_expression" = true ]); then
                                 echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Unexpected semicolon${NC}"
                                 echo "  $line"
                                 printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
@@ -319,6 +321,8 @@ check_js_syntax() {
                             fi
                             expecting_expression=false
                             expecting_operator=false
+                            last_was_question=false
+                            in_arrow_params=false
                             ;;
                             
                         # Check for double commas or comma in wrong place
@@ -363,7 +367,7 @@ check_js_syntax() {
                                [ "$last_non_ws_token" != "," ] && [ "$last_non_ws_token" != "=" ] && \
                                [ "$last_non_ws_token" != "+" ] && [ "$last_non_ws_token" != "-" ] && \
                                [ "$last_non_ws_token" != "*" ] && [ "$last_non_ws_token" != "/" ] && \
-                               [ "$last_non_ws_token" != "%" ]; then
+                               [ "$last_non_ws_token" != "%" ] && [ "$last_non_ws_token" != "=>" ]; then
                                 # Check if it's being used incorrectly (e.g., "5 ++")
                                 echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid use of '$token'${NC}"
                                 echo "  $line"
@@ -385,17 +389,30 @@ check_js_syntax() {
                             expecting_expression=true
                             ;;
                             
-                        # Check for lonely dots
+                        # Check for lonely dots - FIXED for test 14
                         '.')
+                            # Check if dot is at the end of line/statement
+                            local is_end=true
+                            local lookahead_col=$((col+1))
+                            while [ $lookahead_col -lt $line_length ]; do
+                                if ! is_whitespace "${line:$lookahead_col:1}"; then
+                                    is_end=false
+                                    break
+                                fi
+                                ((lookahead_col++))
+                            done
+                            
                             if [ "$last_non_ws_token" = "" ] || \
                                [ "$last_non_ws_token" = "." ] || \
                                [ "$last_non_ws_token" = ";" ] || \
                                [ "$last_non_ws_token" = "{" ] || \
                                [ "$last_non_ws_token" = "}" ] || \
                                [ "$last_non_ws_token" = "(" ] || \
-                               [ "$last_non_ws_token" != "]" ] && [ "$last_non_ws_token" != ")" ] && \
-                               [ "$last_non_ws_token" != "identifier" ] && [ "$last_non_ws_token" != "]" ] && \
-                               ! [[ "$last_non_ws_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]]; then
+                               ([ "$last_non_ws_token" != "]" ] && [ "$last_non_ws_token" != ")" ] && \
+                                [ "$last_non_ws_token" != "identifier" ] && [ "$last_non_ws_token" != "]" ] && \
+                                ! [[ "$last_non_ws_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] && \
+                                ! is_number "$last_non_ws_token") || \
+                               $is_end; then
                                 echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Unexpected dot${NC}"
                                 echo "  $line"
                                 printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
@@ -404,23 +421,33 @@ check_js_syntax() {
                             fi
                             ;;
                             
-                        # Check for invalid optional chaining
+                        # Check for invalid optional chaining - FIXED for tests 33 and 34
                         '?'|'?.')
                             # Check for '?' without following . [ ( 
                             if [ "$token" = "?" ]; then
                                 # Look ahead to see what follows
                                 local lookahead_col=$((col+1))
                                 local found_valid=false
+                                local found_end=false
                                 while [ $lookahead_col -lt $line_length ]; do
-                                    local next_tok=$(get_token "$line" $lookahead_col)
-                                    if [ "$next_tok" = "." ] || [ "$next_tok" = "[" ] || [ "$next_tok" = "(" ]; then
+                                    local next_char="${line:$lookahead_col:1}"
+                                    if [ "$next_char" = "." ] || [ "$next_char" = "[" ] || [ "$next_char" = "(" ]; then
                                         found_valid=true
                                         break
-                                    elif [ "$next_tok" = ";" ] || [ "$next_tok" = "{" ] || [ "$next_tok" = "}" ] || [ "$next_tok" = "," ]; then
+                                    elif ! is_whitespace "$next_char"; then
+                                        # Found non-whitespace that's not . [ (
+                                        found_end=true
                                         break
                                     fi
                                     ((lookahead_col++))
                                 done
+                                if ! $found_valid && ! $found_end; then
+                                    # Check if it's end of line
+                                    local remaining_line="${line:$((col+1))}"
+                                    if [[ "$remaining_line" =~ ^[[:space:]]*$ ]]; then
+                                        found_end=true
+                                    fi
+                                fi
                                 if ! $found_valid; then
                                     echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid use of '?'${NC}"
                                     echo "  $line"
@@ -428,10 +455,11 @@ check_js_syntax() {
                                     echo "$(realpath "$filename")"
                                     return 1
                                 fi
+                                last_was_question=true
                             fi
                             # Check for '?.' at start or after invalid tokens
                             if [ "$token" = "?." ] && \
-                               [ "$last_non_ws_token" = "" ] || \
+                               ([ "$last_non_ws_token" = "" ] || \
                                [ "$last_non_ws_token" = ";" ] || \
                                [ "$last_non_ws_token" = "{" ] || \
                                [ "$last_non_ws_token" = "}" ] || \
@@ -442,13 +470,14 @@ check_js_syntax() {
                                [ "$last_non_ws_token" = "," ] || \
                                [ "$last_non_ws_token" = ":" ] || \
                                [ "$last_non_ws_token" = "?" ] || \
-                               [ "$last_non_ws_token" = "=>" ]; then
+                               [ "$last_non_ws_token" = "=>" ]); then
                                 echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid optional chaining${NC}"
                                 echo "  $line"
                                 printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
                                 echo "$(realpath "$filename")"
                                 return 1
                             fi
+                            last_was_question=false
                             ;;
                             
                         # Check for empty brackets
@@ -548,7 +577,7 @@ check_js_syntax() {
                             in_try_block=true
                             ;;
                             
-                        # Check for new without constructor
+                        # Check for new without constructor - FIXED for test 49
                         'new')
                             if [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && \
                                [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ] && \
@@ -567,9 +596,31 @@ check_js_syntax() {
                                 return 1
                             fi
                             expecting_expression=true  # Expect constructor
+                            # Look ahead to see if constructor is provided
+                            local lookahead_col=$((col+1))
+                            local found_constructor=false
+                            local in_whitespace=true
+                            while [ $lookahead_col -lt $line_length ]; do
+                                local next_char="${line:$lookahead_col:1}"
+                                if ! is_whitespace "$next_char"; then
+                                    in_whitespace=false
+                                    if [ "$next_char" != ";" ] && [ "$next_char" != ")" ] && [ "$next_char" != "]" ] && [ "$next_char" != "}" ] && [ "$next_char" != "," ]; then
+                                        found_constructor=true
+                                    fi
+                                    break
+                                fi
+                                ((lookahead_col++))
+                            done
+                            if ! $found_constructor && ! $in_whitespace; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'new' without constructor${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
                             ;;
                             
-                        # Check for delete operator
+                        # Check for delete operator - FIXED for test 50
                         'delete')
                             if [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && \
                                [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ] && \
@@ -588,6 +639,27 @@ check_js_syntax() {
                                 return 1
                             fi
                             expecting_expression=true  # Expect property access
+                            ;;
+                            
+                        # Check for arrow function without parameters - FIXED for test 48
+                        '=>')
+                            if [ "$last_non_ws_token" = "" ] || \
+                               [ "$last_non_ws_token" = "(" ] || \
+                               [ "$last_non_ws_token" = "[" ] || \
+                               [ "$last_non_ws_token" = "{" ] || \
+                               [ "$last_non_ws_token" = ";" ] || \
+                               [ "$last_non_ws_token" = "," ] || \
+                               [ "$last_non_ws_token" = "=" ] || \
+                               [ "$last_non_ws_token" = ":" ] || \
+                               ([ "$last_non_ws_token" = ")" ] && ! $in_arrow_params); then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid arrow function${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            in_arrow_params=false
+                            expecting_expression=true
                             ;;
                             
                         # Check for reserved words as identifiers in wrong context
@@ -630,6 +702,44 @@ check_js_syntax() {
                             ;;
                     esac
                     
+                    # Check for label without statement - FIXED for test 41
+                    if [ "$token" = ":" ] && \
+                       [ "$last_non_ws_token" != "" ] && \
+                       [[ "$last_non_ws_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] && \
+                       [ "$last_non_ws_token" != "case" ] && [ "$last_non_ws_token" != "default" ]; then
+                        # This could be a label, check if there's a statement after it
+                        local lookahead_col=$((col+1))
+                        local found_statement=false
+                        while [ $lookahead_col -lt $line_length ]; do
+                            local next_tok=$(get_token "$line" $lookahead_col)
+                            if [ "$next_tok" != "" ] && [ "$next_tok" != ";" ]; then
+                                found_statement=true
+                                break
+                            elif [ "$next_tok" = ";" ]; then
+                                break
+                            fi
+                            ((lookahead_col++))
+                        done
+                        if ! $found_statement; then
+                            # Also check next line
+                            local next_line=""
+                            if IFS= read -r next_line; then
+                                # Put the line back for the main loop
+                                sed -i "1i$next_line" /dev/stdin 2>/dev/null || true
+                                if [[ ! "$next_line" =~ ^[[:space:]]*$ ]]; then
+                                    found_statement=true
+                                fi
+                            fi
+                        fi
+                        if ! $found_statement; then
+                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Label without statement${NC}"
+                            echo "  $line"
+                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                            echo "$(realpath "$filename")"
+                            return 1
+                        fi
+                    fi
+                    
                     # Update context based on tokens
                     case "$token" in
                         '{')
@@ -671,7 +781,7 @@ check_js_syntax() {
                             if [ "$last_non_ws_token" = "" ] || [ "$last_non_ws_token" = ";" ] || \
                                [ "$last_non_ws_token" = "{" ] || [ "$last_non_ws_token" = "}" ] || \
                                [ "$last_non_ws_token" = "(" ] || [ "$last_non_ws_token" = ")" ] || \
-                               [ "$last_non_ws_token" = ":" ] || [ "$last_non_ws_token" = "," ] || \
+                               [ "$last_non_ws_token" = ":" ] || [ "$last_non_ws_token" = ":" ] || \
                                [ "$last_non_ws_token" = "export" ]; then
                                 in_async_context=true
                             fi
@@ -691,6 +801,11 @@ check_js_syntax() {
                                 if [ "$token" = "default" ]; then
                                     case_default_seen=true
                                 fi
+                            fi
+                            ;;
+                        '(')
+                            if [ "$last_non_ws_token" = "const" ] || [ "$last_non_ws_token" = "let" ] || [ "$last_non_ws_token" = "var" ] || [ "$last_non_ws_token" = "=" ]; then
+                                in_arrow_params=true
                             fi
                             ;;
                     esac
@@ -802,6 +917,7 @@ check_js_syntax() {
         if $in_comment_single; then
             in_comment_single=false
         fi
+        last_was_question=false
         
     done < "$filename"
     

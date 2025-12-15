@@ -3,7 +3,7 @@
 # JavaScript Token Error Auditor - Pure Bash Implementation
 # Usage: ./basics.sh <filename.js> [--test]
 
-AUDIT_SCRIPT_VERSION="2.0.0"
+AUDIT_SCRIPT_VERSION="2.1.0"
 TEST_DIR="basics_tests"
 
 # Color codes for output
@@ -167,6 +167,14 @@ check_js_syntax() {
     local last_non_ws_token=""
     local expecting_expression=false
     local expecting_operator=false
+    local context_stack=()  # Track context: "function", "loop", "switch", "async", "generator"
+    local in_function=false
+    local in_loop=false
+    local in_switch=false
+    local in_async_context=false
+    local in_generator=false
+    local in_try_block=false
+    local case_default_seen=false
     
     # Read file line by line
     while IFS= read -r line || [ -n "$line" ]; do
@@ -279,6 +287,23 @@ check_js_syntax() {
                             fi
                             ;;
                             
+                        # Check control flow keywords
+                        'if'|'while'|'for'|'switch'|'catch')
+                            if [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && \
+                               [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ] && \
+                               [ "$last_non_ws_token" != ")" ] && [ "$last_non_ws_token" != "else" ] && \
+                               [ "$last_non_ws_token" != "try" ] && [ "$last_non_ws_token" != "finally" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Unexpected '$token'${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            if [ "$token" = "if" ] || [ "$token" = "while" ] || [ "$token" = "for" ] || [ "$token" = "switch" ]; then
+                                expecting_expression=true
+                            fi
+                            ;;
+                            
                         # Check for lonely semicolon (semicolon without preceding expression)
                         ';')
                             if [ "$last_non_ws_token" = "" ] || \
@@ -368,13 +393,9 @@ check_js_syntax() {
                                [ "$last_non_ws_token" = "{" ] || \
                                [ "$last_non_ws_token" = "}" ] || \
                                [ "$last_non_ws_token" = "(" ] || \
-                               [ "$last_non_ws_token" = ")" ] || \
-                               [ "$last_non_ws_token" = "[" ] || \
-                               [ "$last_non_ws_token" = "]" ] || \
-                               [ "$last_non_ws_token" = "," ] || \
-                               [ "$last_non_ws_token" = ":" ] || \
-                               [ "$last_non_ws_token" = "?" ] || \
-                               [ "$last_non_ws_token" = "=>" ]; then
+                               [ "$last_non_ws_token" != "]" ] && [ "$last_non_ws_token" != ")" ] && \
+                               [ "$last_non_ws_token" != "identifier" ] && [ "$last_non_ws_token" != "]" ] && \
+                               ! [[ "$last_non_ws_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]]; then
                                 echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Unexpected dot${NC}"
                                 echo "  $line"
                                 printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
@@ -384,8 +405,33 @@ check_js_syntax() {
                             ;;
                             
                         # Check for invalid optional chaining
-                        '?.')
-                            if [ "$last_non_ws_token" = "" ] || \
+                        '?'|'?.')
+                            # Check for '?' without following . [ ( 
+                            if [ "$token" = "?" ]; then
+                                # Look ahead to see what follows
+                                local lookahead_col=$((col+1))
+                                local found_valid=false
+                                while [ $lookahead_col -lt $line_length ]; do
+                                    local next_tok=$(get_token "$line" $lookahead_col)
+                                    if [ "$next_tok" = "." ] || [ "$next_tok" = "[" ] || [ "$next_tok" = "(" ]; then
+                                        found_valid=true
+                                        break
+                                    elif [ "$next_tok" = ";" ] || [ "$next_tok" = "{" ] || [ "$next_tok" = "}" ] || [ "$next_tok" = "," ]; then
+                                        break
+                                    fi
+                                    ((lookahead_col++))
+                                done
+                                if ! $found_valid; then
+                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid use of '?'${NC}"
+                                    echo "  $line"
+                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                    echo "$(realpath "$filename")"
+                                    return 1
+                                fi
+                            fi
+                            # Check for '?.' at start or after invalid tokens
+                            if [ "$token" = "?." ] && \
+                               [ "$last_non_ws_token" = "" ] || \
                                [ "$last_non_ws_token" = ";" ] || \
                                [ "$last_non_ws_token" = "{" ] || \
                                [ "$last_non_ws_token" = "}" ] || \
@@ -403,6 +449,145 @@ check_js_syntax() {
                                 echo "$(realpath "$filename")"
                                 return 1
                             fi
+                            ;;
+                            
+                        # Check for empty brackets
+                        '[')
+                            # Check if this is empty brackets like obj[]
+                            local lookahead_col=$((col+1))
+                            local next_token=""
+                            if [ $lookahead_col -lt $line_length ]; then
+                                next_token=$(get_token "$line" $lookahead_col)
+                            fi
+                            if [ "$next_token" = "]" ] && [ "$last_non_ws_token" != "?" ] && [ "${last_non_ws_token: -1}" != "?" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Empty brackets${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            ;;
+                            
+                        # Check for break/continue outside loop/switch
+                        'break'|'continue')
+                            if ! $in_loop && ! $in_switch && [ "$token" = "break" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'break' outside loop or switch${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            if ! $in_loop && [ "$token" = "continue" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'continue' outside loop${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            ;;
+                            
+                        # Check for return outside function
+                        'return')
+                            if ! $in_function; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'return' outside function${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            ;;
+                            
+                        # Check for await outside async context
+                        'await')
+                            if ! $in_async_context; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'await' outside async function${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            ;;
+                            
+                        # Check for yield outside generator
+                        'yield')
+                            if ! $in_generator; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'yield' outside generator${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            ;;
+                            
+                        # Check for function keyword
+                        'function')
+                            if [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && \
+                               [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ] && \
+                               [ "$last_non_ws_token" != "(" ] && [ "$last_non_ws_token" != ")" ] && \
+                               [ "$last_non_ws_token" != ":" ] && [ "$last_non_ws_token" != "," ] && \
+                               [ "$last_non_ws_token" != "export" ] && [ "$last_non_ws_token" != "async" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Unexpected 'function'${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            expecting_expression=true  # Expect function name or parameters
+                            ;;
+                            
+                        # Check for try without braces
+                        'try')
+                            if [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && \
+                               [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Unexpected 'try'${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            in_try_block=true
+                            ;;
+                            
+                        # Check for new without constructor
+                        'new')
+                            if [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && \
+                               [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ] && \
+                               [ "$last_non_ws_token" != "(" ] && [ "$last_non_ws_token" != ")" ] && \
+                               [ "$last_non_ws_token" != "[" ] && [ "$last_non_ws_token" != "]" ] && \
+                               [ "$last_non_ws_token" != "," ] && [ "$last_non_ws_token" != "=" ] && \
+                               [ "$last_non_ws_token" != "+" ] && [ "$last_non_ws_token" != "-" ] && \
+                               [ "$last_non_ws_token" != "*" ] && [ "$last_non_ws_token" != "/" ] && \
+                               [ "$last_non_ws_token" != "%" ] && [ "$last_non_ws_token" != "?" ] && \
+                               [ "$last_non_ws_token" != ":" ] && [ "$last_non_ws_token" != "&&" ] && \
+                               [ "$last_non_ws_token" != "||" ] && [ "$last_non_ws_token" != "??" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Unexpected 'new'${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            expecting_expression=true  # Expect constructor
+                            ;;
+                            
+                        # Check for delete operator
+                        'delete')
+                            if [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && \
+                               [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ] && \
+                               [ "$last_non_ws_token" != "(" ] && [ "$last_non_ws_token" != ")" ] && \
+                               [ "$last_non_ws_token" != "[" ] && [ "$last_non_ws_token" != "]" ] && \
+                               [ "$last_non_ws_token" != "," ] && [ "$last_non_ws_token" != "=" ] && \
+                               [ "$last_non_ws_token" != "+" ] && [ "$last_non_ws_token" != "-" ] && \
+                               [ "$last_non_ws_token" != "*" ] && [ "$last_non_ws_token" != "/" ] && \
+                               [ "$last_non_ws_token" != "%" ] && [ "$last_non_ws_token" != "?" ] && \
+                               [ "$last_non_ws_token" != ":" ] && [ "$last_non_ws_token" != "&&" ] && \
+                               [ "$last_non_ws_token" != "||" ] && [ "$last_non_ws_token" != "??" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Unexpected 'delete'${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            expecting_expression=true  # Expect property access
                             ;;
                             
                         # Check for reserved words as identifiers in wrong context
@@ -445,6 +630,71 @@ check_js_syntax() {
                             ;;
                     esac
                     
+                    # Update context based on tokens
+                    case "$token" in
+                        '{')
+                            if [ "$last_non_ws_token" = "function" ] || \
+                               [ "$last_non_ws_token" = "=>" ] || \
+                               [[ "$last_non_ws_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] && [ "$last_non_ws_token" != "if" ] && [ "$last_non_ws_token" != "while" ] && [ "$last_non_ws_token" != "for" ] && [ "$last_non_ws_token" != "switch" ] && [ "$last_non_ws_token" != "try" ] && [ "$last_non_ws_token" != "catch" ] && [ "$last_non_ws_token" != "finally" ]; then
+                                in_function=true
+                            elif [ "$last_non_ws_token" = "try" ]; then
+                                in_try_block=false
+                            elif $in_try_block; then
+                                in_try_block=false
+                            fi
+                            # Reset switch-specific flags when entering new block
+                            case_default_seen=false
+                            ;;
+                        '}')
+                            # Check if we're exiting a function context
+                            if $in_function && [ $brace_count -eq 0 ]; then
+                                in_function=false
+                                in_async_context=false
+                                in_generator=false
+                            fi
+                            if $in_loop && [ $brace_count -eq 0 ]; then
+                                in_loop=false
+                            fi
+                            if $in_switch && [ $brace_count -eq 0 ]; then
+                                in_switch=false
+                                case_default_seen=false
+                            fi
+                            ;;
+                        'while'|'for'|'do')
+                            in_loop=true
+                            ;;
+                        'switch')
+                            in_switch=true
+                            case_default_seen=false
+                            ;;
+                        'async')
+                            if [ "$last_non_ws_token" = "" ] || [ "$last_non_ws_token" = ";" ] || \
+                               [ "$last_non_ws_token" = "{" ] || [ "$last_non_ws_token" = "}" ] || \
+                               [ "$last_non_ws_token" = "(" ] || [ "$last_non_ws_token" = ")" ] || \
+                               [ "$last_non_ws_token" = ":" ] || [ "$last_non_ws_token" = "," ] || \
+                               [ "$last_non_ws_token" = "export" ]; then
+                                in_async_context=true
+                            fi
+                            ;;
+                        'function*')
+                            in_generator=true
+                            ;;
+                        'case'|'default')
+                            if $in_switch; then
+                                if [ "$token" = "default" ] && $case_default_seen; then
+                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Duplicate default in switch${NC}"
+                                    echo "  $line"
+                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                    echo "$(realpath "$filename")"
+                                    return 1
+                                fi
+                                if [ "$token" = "default" ]; then
+                                    case_default_seen=true
+                                fi
+                            fi
+                            ;;
+                    esac
+                    
                     # Update last non-whitespace token
                     if [ "$token" != "" ]; then
                         last_non_ws_token="$token"
@@ -459,6 +709,89 @@ check_js_syntax() {
                         '(') ((paren_count++)) ;;
                         ')') ((paren_count--)) ;;
                     esac
+                    
+                    # Check for missing parentheses after if/while/for/switch
+                    if [ "$token" = "if" ] || [ "$token" = "while" ] || [ "$token" = "for" ] || [ "$token" = "switch" ]; then
+                        # Look ahead for '('
+                        local lookahead_col=$col
+                        local found_paren=false
+                        while [ $lookahead_col -lt $line_length ]; do
+                            local next_tok=$(get_token "$line" $lookahead_col)
+                            if [ "$next_tok" = "(" ]; then
+                                found_paren=true
+                                break
+                            elif [ "$next_tok" = "{" ] || [ "$next_tok" = ";" ]; then
+                                break
+                            fi
+                            ((lookahead_col++))
+                        done
+                        if ! $found_paren; then
+                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Missing parentheses after '$token'${NC}"
+                            echo "  $line"
+                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                            echo "$(realpath "$filename")"
+                            return 1
+                        fi
+                    fi
+                    
+                    # Check for missing colon after case/default
+                    if [ "$token" = "case" ] || [ "$token" = "default" ]; then
+                        # Look ahead for ':'
+                        local lookahead_col=$col
+                        local found_colon=false
+                        while [ $lookahead_col -lt $line_length ]; do
+                            local next_tok=$(get_token "$line" $lookahead_col)
+                            if [ "$next_tok" = ":" ]; then
+                                found_colon=true
+                                break
+                            elif [ "$next_tok" = ";" ] || [ "$next_tok" = "{" ] || [ "$next_tok" = "}" ]; then
+                                break
+                            fi
+                            ((lookahead_col++))
+                        done
+                        if ! $found_colon; then
+                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Missing colon after '$token'${NC}"
+                            echo "  $line"
+                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                            echo "$(realpath "$filename")"
+                            return 1
+                        fi
+                    fi
+                    
+                    # Check for missing braces after try
+                    if $in_try_block && [ "$token" = "{" ]; then
+                        in_try_block=false
+                    elif $in_try_block && [ "$token" != "{" ] && [ "$token" != "catch" ] && [ "$token" != "finally" ]; then
+                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Missing braces after 'try'${NC}"
+                        echo "  $line"
+                        printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                        echo "$(realpath "$filename")"
+                        return 1
+                    fi
+                    
+                    # Check for missing parentheses after function name
+                    if [ "$last_non_ws_token" = "function" ] && [[ "$token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]]; then
+                        # Function name found, next should be '('
+                        local lookahead_col=$col
+                        local found_paren=false
+                        while [ $lookahead_col -lt $line_length ]; do
+                            local next_tok=$(get_token "$line" $lookahead_col)
+                            if [ "$next_tok" = "(" ]; then
+                                found_paren=true
+                                break
+                            elif [ "$next_tok" = "{" ] || [ "$next_tok" = ";" ]; then
+                                break
+                            fi
+                            ((lookahead_col++))
+                        done
+                        if ! $found_paren; then
+                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Missing parentheses after function name${NC}"
+                            echo "  $line"
+                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                            echo "$(realpath "$filename")"
+                            return 1
+                        fi
+                    fi
                 fi
             fi
             

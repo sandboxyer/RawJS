@@ -3,7 +3,7 @@
 # JavaScript Token Error Auditor - Pure Bash Implementation
 # Usage: ./basics.sh <filename.js> [--test]
 
-AUDIT_SCRIPT_VERSION="2.2.0"
+AUDIT_SCRIPT_VERSION="2.3.0"
 TEST_DIR="basics_tests"
 
 # Color codes for output
@@ -151,7 +151,6 @@ get_token() {
     fi
     
     echo "$token"
-    return $((pos-start))
 }
 
 # Function to check for token errors in JavaScript code
@@ -181,6 +180,8 @@ check_js_syntax() {
     local case_default_seen=false
     local in_delete_context=false
     local in_new_context=false
+    local label_pending=false
+    local in_optional_chain=false
     
     # Read file line by line
     while IFS= read -r line || [ -n "$line" ]; do
@@ -309,6 +310,15 @@ check_js_syntax() {
                             
                         # Check for lonely semicolon (semicolon without preceding expression)
                         ';')
+                            # Check for new without constructor - FIXED: Test 49
+                            if $in_new_context; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'new' operator without constructor${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                            
                             if [ "$last_non_ws_token" = "" ] || \
                                [ "$last_non_ws_token" = ";" ] || \
                                [ "$last_non_ws_token" = "{" ] || \
@@ -324,6 +334,7 @@ check_js_syntax() {
                             expecting_operator=false
                             in_delete_context=false
                             in_new_context=false
+                            in_optional_chain=false
                             ;;
                             
                         # Check for double commas or comma in wrong place
@@ -343,6 +354,7 @@ check_js_syntax() {
                             fi
                             expecting_expression=true
                             expecting_operator=false
+                            in_optional_chain=false
                             ;;
                             
                         # Check for invalid spread operator usage
@@ -392,7 +404,7 @@ check_js_syntax() {
                             expecting_expression=true
                             ;;
                             
-                        # Check for lonely dots - FIXED: Test 14
+                        # Check for lonely dots
                         '.')
                             # Special case: check for lonely dot after delete or new
                             if $in_delete_context && [ "$last_non_ws_token" = "delete" ]; then
@@ -448,11 +460,16 @@ check_js_syntax() {
                             
                         # Check for invalid optional chaining - FIXED: Tests 33, 34
                         '?'|'?.')
+                            # Track that we're in optional chain context
+                            in_optional_chain=true
+                            
                             # Check for '?' without following . [ ( 
                             if [ "$token" = "?" ]; then
                                 # Look ahead to see what follows
                                 local lookahead_col=$((col+1))
                                 local found_valid=false
+                                local found_dot=false
+                                local found_bracket_or_paren=false
                                 while [ $lookahead_col -lt $line_length ]; do
                                     local next_tok_char="${line:$lookahead_col:1}"
                                     # Skip whitespace
@@ -460,23 +477,39 @@ check_js_syntax() {
                                         ((lookahead_col++))
                                         continue
                                     fi
-                                    # Check for valid follow-ups: . [ (
-                                    if [ "$next_tok_char" = "." ] || [ "$next_tok_char" = "[" ] || [ "$next_tok_char" = "(" ]; then
-                                        found_valid=true
-                                        break
-                                    elif [ "$next_tok_char" = ";" ] || [ "$next_tok_char" = "{" ] || [ "$next_tok_char" = "}" ] || [ "$next_tok_char" = "," ]; then
+                                    # Check for dot after ?
+                                    if [ "$next_tok_char" = "." ]; then
+                                        found_dot=true
                                         break
                                     fi
-                                    ((lookahead_col++))
+                                    # Check for [ or ( after ? (which is invalid without dot)
+                                    if [ "$next_tok_char" = "[" ] || [ "$next_tok_char" = "(" ]; then
+                                        found_bracket_or_paren=true
+                                        break
+                                    fi
+                                    # Other characters break the check
+                                    break
                                 done
-                                if ! $found_valid; then
-                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid use of '?'${NC}"
+                                
+                                # If found [ or ( without dot, it's an error
+                                if $found_bracket_or_paren && ! $found_dot; then
+                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Optional chaining requires dot before bracket or paren${NC}"
+                                    echo "  $line"
+                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                    echo "$(realpath "$filename")"
+                                    return 1
+                                fi
+                                
+                                # Also check if ? is followed by nothing (end of line)
+                                if [ $lookahead_col -ge $line_length ]; then
+                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid optional chaining${NC}"
                                     echo "  $line"
                                     printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
                                     echo "$(realpath "$filename")"
                                     return 1
                                 fi
                             fi
+                            
                             # Check for '?.' at start or after invalid tokens
                             if [ "$token" = "?." ] && \
                                [ "$last_non_ws_token" = "" ] || \
@@ -507,7 +540,7 @@ check_js_syntax() {
                             if [ $lookahead_col -lt $line_length ]; then
                                 next_token=$(get_token "$line" $lookahead_col)
                             fi
-                            if [ "$next_token" = "]" ] && [ "$last_non_ws_token" != "?" ] && [ "${last_non_ws_token: -1}" != "?" ]; then
+                            if [ "$next_token" = "]" ] && [ "$last_non_ws_token" != "?" ] && [ "${last_non_ws_token: -1}" != "?" ] && ! $in_optional_chain; then
                                 echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Empty brackets${NC}"
                                 echo "  $line"
                                 printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
@@ -618,7 +651,7 @@ check_js_syntax() {
                             in_new_context=true
                             ;;
                             
-                        # Check for delete operator - FIXED: Test 50
+                        # Check for delete operator
                         'delete')
                             if [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && \
                                [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ] && \
@@ -640,7 +673,7 @@ check_js_syntax() {
                             in_delete_context=true
                             ;;
                             
-                        # Check for arrow function error - FIXED: Test 48
+                        # Check for arrow function error
                         '=>')
                             if [ "$last_non_ws_token" = "" ] || [ "$last_non_ws_token" = "=" ] || \
                                [ "$last_non_ws_token" = "(" ] || [ "$last_non_ws_token" = "[" ] || \
@@ -694,6 +727,9 @@ check_js_syntax() {
                             
                             # Check for label without statement - FIXED: Test 41
                             if [[ "$token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] && [ "$next_char" = ":" ]; then
+                                # Set label pending flag
+                                label_pending=true
+                                
                                 # Look ahead to see if there's a statement after the label
                                 local label_lookahead=$((col+2))
                                 local found_statement=false
@@ -701,17 +737,22 @@ check_js_syntax() {
                                     local label_next_char="${line:$label_lookahead:1}"
                                     if ! is_whitespace "$label_next_char"; then
                                         found_statement=true
+                                        label_pending=false
                                         break
                                     fi
                                     ((label_lookahead++))
                                 done
+                                
+                                # If no statement found on same line, check next lines
                                 if ! $found_statement; then
-                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Label without statement${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                    echo "$(realpath "$filename")"
-                                    return 1
+                                    # We'll check at the end of file if label_pending is still true
+                                    :
                                 fi
+                            fi
+                            
+                            # Reset label_pending if we see any non-whitespace token that's not a label
+                            if $label_pending && [ "$token" != ":" ] && [[ ! "$token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]]; then
+                                label_pending=false
                             fi
                             ;;
                     esac
@@ -730,6 +771,7 @@ check_js_syntax() {
                             fi
                             # Reset switch-specific flags when entering new block
                             case_default_seen=false
+                            label_pending=false
                             ;;
                         '}')
                             # Check if we're exiting a function context
@@ -745,13 +787,16 @@ check_js_syntax() {
                                 in_switch=false
                                 case_default_seen=false
                             fi
+                            label_pending=false
                             ;;
                         'while'|'for'|'do')
                             in_loop=true
+                            label_pending=false
                             ;;
                         'switch')
                             in_switch=true
                             case_default_seen=false
+                            label_pending=false
                             ;;
                         'async')
                             if [ "$last_non_ws_token" = "" ] || [ "$last_non_ws_token" = ";" ] || \
@@ -761,9 +806,11 @@ check_js_syntax() {
                                [ "$last_non_ws_token" = "export" ]; then
                                 in_async_context=true
                             fi
+                            label_pending=false
                             ;;
                         'function*')
                             in_generator=true
+                            label_pending=false
                             ;;
                         'case'|'default')
                             if $in_switch; then
@@ -777,6 +824,13 @@ check_js_syntax() {
                                 if [ "$token" = "default" ]; then
                                     case_default_seen=true
                                 fi
+                            fi
+                            label_pending=false
+                            ;;
+                        *)
+                            # Reset optional chain flag for most tokens
+                            if [ "$token" != "?" ] && [ "$token" != "?." ]; then
+                                in_optional_chain=false
                             fi
                             ;;
                     esac
@@ -933,6 +987,13 @@ check_js_syntax() {
         
     done < "$filename"
     
+    # Check for label without statement at end of file - FIXED: Test 41
+    if $label_pending; then
+        echo -e "${RED}Error at end of file: Label without statement${NC}"
+        echo "$(realpath "$filename")"
+        return 1
+    fi
+    
     # Check for unterminated constructs
     if $in_string_single; then
         echo -e "${RED}Error: Unterminated single-quoted string${NC}"
@@ -991,7 +1052,7 @@ check_js_syntax() {
         return 1
     fi
     
-    # Check for label without statement at end of file
+    # Check for label without statement at end of file (alternative check)
     if [[ "$last_non_ws_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] && [ "${last_non_ws_token: -1}" != ":" ]; then
         # This is okay
         :

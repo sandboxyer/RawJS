@@ -182,6 +182,7 @@ check_js_syntax() {
                         echo -e "${RED}Error at line $line_number, column $((col+1)): Unexpected semicolon${NC}"
                         echo "  $line"
                         printf "%*s^%s\n" $col "" "${RED}here${NC}"
+                        echo "$(realpath "$filename")"
                         return 1
                     fi
                 fi
@@ -192,6 +193,7 @@ check_js_syntax() {
                         echo -e "${RED}Error at line $line_number, column $((col+1)): Unexpected comma${NC}"
                         echo "  $line"
                         printf "%*s^%s\n" $col "" "${RED}here${NC}"
+                        echo "$(realpath "$filename")"
                         return 1
                     fi
                 fi
@@ -211,6 +213,7 @@ check_js_syntax() {
                         echo -e "${RED}Error at line $line_number, column $((col+1)): Invalid variable name starting with number${NC}"
                         echo "  $line"
                         printf "%*s^%s\n" $col "" "${RED}starts here${NC}"
+                        echo "$(realpath "$filename")"
                         return 1
                     fi
                 fi
@@ -233,47 +236,58 @@ check_js_syntax() {
     # Check for unterminated constructs
     if $in_string_single; then
         echo -e "${RED}Error: Unterminated single-quoted string${NC}"
+        echo "$(realpath "$filename")"
         return 1
     fi
     if $in_string_double; then
         echo -e "${RED}Error: Unterminated double-quoted string${NC}"
+        echo "$(realpath "$filename")"
         return 1
     fi
     if $in_template; then
         echo -e "${RED}Error: Unterminated template literal${NC}"
+        echo "$(realpath "$filename")"
         return 1
     fi
     if $in_comment_multi; then
         echo -e "${RED}Error: Unterminated multi-line comment${NC}"
+        echo "$(realpath "$filename")"
         return 1
     fi
     if $in_regex; then
         echo -e "${RED}Error: Unterminated regular expression${NC}"
+        echo "$(realpath "$filename")"
         return 1
     fi
     
     # Check bracket/brace/paren counts
     if [ $brace_count -gt 0 ]; then
         echo -e "${RED}Error: Unclosed { (missing } )${NC}"
+        echo "$(realpath "$filename")"
         return 1
     elif [ $brace_count -lt 0 ]; then
         echo -e "${RED}Error: Unexpected } (extra closing brace)${NC}"
+        echo "$(realpath "$filename")"
         return 1
     fi
     
     if [ $bracket_count -gt 0 ]; then
         echo -e "${RED}Error: Unclosed [ (missing ] )${NC}"
+        echo "$(realpath "$filename")"
         return 1
     elif [ $bracket_count -lt 0 ]; then
         echo -e "${RED}Error: Unexpected ] (extra closing bracket)${NC}"
+        echo "$(realpath "$filename")"
         return 1
     fi
     
     if [ $paren_count -gt 0 ]; then
         echo -e "${RED}Error: Unclosed ( (missing ) )${NC}"
+        echo "$(realpath "$filename")"
         return 1
     elif [ $paren_count -lt 0 ]; then
         echo -e "${RED}Error: Unexpected ) (extra closing parenthesis)${NC}"
+        echo "$(realpath "$filename")"
         return 1
     fi
     

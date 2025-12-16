@@ -3,3 +3,8 @@
 /dev
 arch_output
 build_output.asm
+
+._/tree/**
+!._/tree/**/*.asm
+!._/tree/**/*.sh
+!._/tree/**/

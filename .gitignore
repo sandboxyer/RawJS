@@ -2,4 +2,4 @@
 /test
 /dev
 arch_output
-build_output
+build_output.asm

@@ -2,6 +2,7 @@
 
 # basm.sh - Universal runner for .asm, .sh, and binary files with fallback logic
 # Compatible with both bash and ash
+# IMPORTANT: All execution happens in the CALLER's directory, not where basm.sh is located
 
 # Colors for output (using echo -e for bash, printf for portability)
 if [ -n "$BASH_VERSION" ]; then
@@ -56,7 +57,12 @@ print_color() {
 
 print_color "cyan" "basm - Universal Assembly/Bash/Binary Runner"
 print_color "yellow" "Run .asm, .sh, or binary files with intelligent fallback"
+print_color "blue" "Note: Execution happens in CALLER's directory: $(pwd)"
 echo ""
+
+# Save caller's directory - THIS IS THE CRITICAL CHANGE
+CALLER_DIR="$(pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Check if input file is provided
 if [ $# -lt 1 ]; then
@@ -85,118 +91,129 @@ else
 fi
 
 print_color "blue" "Using $RUNNER_SHELL for .sh file execution"
+print_color "blue" "Caller directory: $CALLER_DIR"
+print_color "blue" "Script directory: $SCRIPT_DIR"
 
-# Function to detect file type
+# Function to detect file type with caller directory awareness
 detect_file_type() {
     local filename="$1"
     
-    if [ -f "$filename" ]; then
-        # Check for .asm extension
-        case "$filename" in
-            *.asm) echo "asm" ;;
-            *.sh) echo "sh" ;;
-            *)
-                # Check if it's executable
-                if [ -x "$filename" ]; then
-                    echo "binary"
-                # Check if it starts with shebang
-                elif head -n 1 "$filename" 2>/dev/null | grep -q "^#!"; then
-                    echo "script"
-                # Use file command to detect binary
-                elif command -v file >/dev/null 2>&1; then
-                    if file "$filename" 2>/dev/null | grep -q -e "ELF" -e "executable" -e "Mach-O" -e "shared object"; then
-                        echo "binary"
-                    else
-                        echo "unknown"
-                    fi
-                else
-                    echo "unknown"
-                fi
-                ;;
-        esac
+    # First check in caller directory
+    if [ -f "$CALLER_DIR/$filename" ]; then
+        local full_path="$CALLER_DIR/$filename"
+    elif [ -f "$filename" ] && [ "$(dirname "$(realpath "$filename" 2>/dev/null || echo "$filename")")" != "$SCRIPT_DIR" ]; then
+        # File exists and is not in script directory
+        local full_path="$filename"
+    elif [ -f "$filename" ]; then
+        # File exists but might be relative to script directory
+        local full_path="$filename"
     else
         echo "not_found"
+        return
     fi
+    
+    case "$full_path" in
+        *.asm) echo "asm:$full_path" ;;
+        *.sh) echo "sh:$full_path" ;;
+        *)
+            # Check if it's executable
+            if [ -x "$full_path" ]; then
+                echo "binary:$full_path"
+            # Check if it starts with shebang
+            elif head -n 1 "$full_path" 2>/dev/null | grep -q "^#!"; then
+                echo "script:$full_path"
+            # Use file command to detect binary
+            elif command -v file >/dev/null 2>&1; then
+                if file "$full_path" 2>/dev/null | grep -q -e "ELF" -e "executable" -e "Mach-O" -e "shared object"; then
+                    echo "binary:$full_path"
+                else
+                    echo "unknown:$full_path"
+                fi
+            else
+                echo "unknown:$full_path"
+            fi
+            ;;
+    esac
 }
 
-# Function to find alternative file
+# Function to find alternative file with caller directory awareness
 find_alternative() {
     local original="$1"
     local current_type="$2"
     
-    # Extract basename and extension using shell parameter expansion
-    local basename="$original"
+    # Try different locations in order of precedence:
+    # 1. In caller directory with same name
+    # 2. In caller directory with different extensions
+    # 3. In script directory
+    # 4. In PATH
+    
+    # Extract basename and extension
+    local basename="${original%.*}"
     local extension=""
     
-    # Remove longest suffix matching .*
-    basename="${original%.*}"
-    
-    # Get extension if any
     if [ "$basename" != "$original" ]; then
         extension="${original##*.}"
     fi
     
-    # Try different file types in order based on current type
+    # Helper function to check if file exists
+    check_file() {
+        local file="$1"
+        
+        # Check in caller directory first
+        if [ -f "$CALLER_DIR/$file" ]; then
+            echo "$CALLER_DIR/$file"
+            return 0
+        # Check as absolute/relative path
+        elif [ -f "$file" ]; then
+            echo "$file"
+            return 0
+        # Check in script directory (last resort)
+        elif [ -f "$SCRIPT_DIR/$file" ]; then
+            echo "$SCRIPT_DIR/$file"
+            return 0
+        else
+            return 1
+        fi
+    }
+    
+    # Try different file types based on current type
     case "$current_type" in
-        asm)
-            # .asm -> .sh -> binary
-            if [ -f "${basename}.sh" ]; then
-                echo "${basename}.sh"
-            elif [ -f "${basename}" ] && [ -x "${basename}" ]; then
-                echo "${basename}"
-            elif [ -f "${basename}" ]; then
-                echo "${basename}"
-            else
-                echo ""
-            fi
+        asm|asm:*)
+            # .asm -> .sh -> binary (without extension)
+            local alt_file=""
+            alt_file=$(check_file "${basename}.sh") || alt_file=$(check_file "$basename") || alt_file=""
+            echo "$alt_file"
             ;;
-        sh)
-            # .sh -> .asm -> binary
-            if [ -f "${basename}.asm" ]; then
-                echo "${basename}.asm"
-            elif [ -f "${basename}" ] && [ -x "${basename}" ]; then
-                echo "${basename}"
-            elif [ -f "${basename}" ]; then
-                echo "${basename}"
-            else
-                echo ""
-            fi
+        sh|sh:*)
+            # .sh -> .asm -> binary (without extension)
+            local alt_file=""
+            alt_file=$(check_file "${basename}.asm") || alt_file=$(check_file "$basename") || alt_file=""
+            echo "$alt_file"
             ;;
-        binary|unknown)
+        binary|binary:*|unknown|unknown:*)
             # binary -> .asm -> .sh
-            if [ -f "${basename}.asm" ]; then
-                echo "${basename}.asm"
-            elif [ -f "${basename}.sh" ]; then
-                echo "${basename}.sh"
-            else
-                echo ""
-            fi
+            local alt_file=""
+            alt_file=$(check_file "${basename}.asm") || alt_file=$(check_file "${basename}.sh") || alt_file=""
+            echo "$alt_file"
             ;;
         not_found)
             # Original not found, try all possibilities
-            # Check if original already has an extension
             if [ -n "$extension" ]; then
                 # Has extension, try without extension
-                if [ -f "${basename}.asm" ]; then
-                    echo "${basename}.asm"
-                elif [ -f "${basename}.sh" ]; then
-                    echo "${basename}.sh"
-                elif [ -f "${basename}" ] && ([ -x "${basename}" ] || (command -v file >/dev/null 2>&1 && file "${basename}" 2>/dev/null | grep -q -e "ELF\|executable\|Mach-O")); then
-                    echo "${basename}"
-                else
-                    echo ""
-                fi
+                local alt_file=""
+                alt_file=$(check_file "${basename}.asm") || \
+                alt_file=$(check_file "${basename}.sh") || \
+                alt_file=$(check_file "$basename") || \
+                alt_file=""
+                echo "$alt_file"
             else
                 # No extension, try with extensions
-                if [ -f "${original}.asm" ]; then
-                    echo "${original}.asm"
-                elif [ -f "${original}.sh" ]; then
-                    echo "${original}.sh"
-                elif [ -f "${original}" ] && ([ -x "${original}" ] || (command -v file >/dev/null 2>&1 && file "${original}" 2>/dev/null | grep -q -e "ELF\|executable\|Mach-O")); then
-                    echo "${original}"
-                else
-                    echo ""
-                fi
+                local alt_file=""
+                alt_file=$(check_file "${original}.asm") || \
+                alt_file=$(check_file "${original}.sh") || \
+                alt_file=$(check_file "$original") || \
+                alt_file=""
+                echo "$alt_file"
             fi
             ;;
         *)
@@ -210,7 +227,8 @@ run_asm() {
     local asm_file="$1"
     local args="$2"
     
-    print_color "blue" "Running Assembly file: ${asm_file}"
+    print_color "blue" "Running Assembly file: $asm_file"
+    print_color "blue" "Execution directory: $CALLER_DIR"
     
     # Determine current architecture
     ARCH=""
@@ -242,8 +260,7 @@ run_asm() {
     
     print_color "green" "Detected architecture: $ARCH (using $FORMAT format)"
     
-    # Set up NASM binary path based on current script location
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    # Set up NASM binary path - relative to SCRIPT directory
     NASM_BINARY="${SCRIPT_DIR}/${ARCH}-linux/nasm-${ARCH}-linux"
     
     # Check if NASM binary exists
@@ -265,14 +282,14 @@ run_asm() {
     # Make NASM binary executable
     chmod +x "$NASM_BINARY" 2>/dev/null || print_color "yellow" "Note: Could not modify NASM permissions"
     
-    # Extract base name for output files
+    # Extract base name for output files - use caller directory for output
     BASENAME="$(basename "$asm_file" .asm)"
-    OUTPUT_DIR="${SCRIPT_DIR}/tmp_build"
-    OBJECT_FILE="${OUTPUT_DIR}/${BASENAME}.o"
-    BINARY_FILE="${OUTPUT_DIR}/${BASENAME}"
+    OUTPUT_DIR="$CALLER_DIR/.basm_tmp_$$"
+    OBJECT_FILE="$OUTPUT_DIR/${BASENAME}.o"
+    BINARY_FILE="$OUTPUT_DIR/${BASENAME}"
     
-    # Clean up previous build and create output directory
-    print_color "blue" "Preparing build environment..."
+    # Clean up previous build and create output directory in caller's directory
+    print_color "blue" "Preparing build environment in: $OUTPUT_DIR"
     rm -rf "$OUTPUT_DIR"
     mkdir -p "$OUTPUT_DIR"
     
@@ -318,9 +335,10 @@ run_asm() {
     rm -f "$OBJECT_FILE"
     print_color "green" "✓ Cleaned up intermediate files"
     
-    # Step 4: Run the binary
+    # Step 4: Run the binary in caller's directory
     print_color "blue" "Step 3: Running $BASENAME..."
     print_color "yellow" "Binary: $BINARY_FILE"
+    print_color "yellow" "Running in directory: $CALLER_DIR"
     
     if [ -n "$args" ]; then
         print_color "yellow" "Arguments: $args"
@@ -328,15 +346,15 @@ run_asm() {
     
     print_color "blue" "========== PROGRAM OUTPUT =========="
     
-    # Run the binary with any provided arguments
-    "$BINARY_FILE" $args
+    # Run the binary in caller's directory with any provided arguments
+    (cd "$CALLER_DIR" && "$BINARY_FILE" $args)
     PROGRAM_EXIT=$?
     
     print_color "blue" "===================================="
     print_color "yellow" "Program exited with code: $PROGRAM_EXIT"
     
     # Optional: Clean up binary after execution
-    print_color "blue" "Cleaning up..."
+    print_color "blue" "Cleaning up temporary files..."
     rm -rf "$OUTPUT_DIR"
     print_color "green" "✓ Cleanup complete"
     
@@ -350,6 +368,7 @@ run_sh() {
     
     print_color "blue" "Running shell script: $sh_file"
     print_color "yellow" "Using shell: $RUNNER_SHELL"
+    print_color "blue" "Execution directory: $CALLER_DIR"
     
     if [ -n "$args" ]; then
         print_color "yellow" "Arguments: $args"
@@ -357,12 +376,8 @@ run_sh() {
     
     print_color "blue" "========== SCRIPT OUTPUT =========="
     
-    # Run the shell script with the determined shell
-    if [ "$RUNNER_SHELL" = "bash" ]; then
-        bash "$sh_file" $args
-    else
-        sh "$sh_file" $args
-    fi
+    # Run the shell script in caller's directory
+    (cd "$CALLER_DIR" && "$RUNNER_SHELL_PATH" "$sh_file" $args)
     SCRIPT_EXIT=$?
     
     print_color "blue" "==================================="
@@ -377,6 +392,7 @@ run_binary() {
     local args="$2"
     
     print_color "blue" "Running binary: $binary_file"
+    print_color "blue" "Execution directory: $CALLER_DIR"
     
     if [ -n "$args" ]; then
         print_color "yellow" "Arguments: $args"
@@ -384,8 +400,8 @@ run_binary() {
     
     print_color "blue" "========== PROGRAM OUTPUT =========="
     
-    # Run the binary with any provided arguments
-    "$binary_file" $args
+    # Run the binary in caller's directory
+    (cd "$CALLER_DIR" && "$binary_file" $args)
     BINARY_EXIT=$?
     
     print_color "blue" "===================================="
@@ -394,42 +410,63 @@ run_binary() {
     return $BINARY_EXIT
 }
 
+# Function to run script file
+run_script() {
+    local script_file="$1"
+    local args="$2"
+    
+    print_color "blue" "Running script: $script_file"
+    print_color "blue" "Execution directory: $CALLER_DIR"
+    
+    if [ -n "$args" ]; then
+        print_color "yellow" "Arguments: $args"
+    fi
+    
+    print_color "blue" "========== SCRIPT OUTPUT =========="
+    
+    # Run the script in caller's directory
+    (cd "$CALLER_DIR" && "$script_file" $args)
+    SCRIPT_EXIT=$?
+    
+    print_color "blue" "==================================="
+    print_color "yellow" "Script exited with code: $SCRIPT_EXIT"
+    
+    return $SCRIPT_EXIT
+}
+
 # Main execution logic
 main() {
     local original_file="$INPUT_FILE"
     local current_file="$original_file"
-    local file_type=""
+    local file_type_info=""
     local fallback_count=0
     
     while true; do
         # Detect file type
-        file_type=$(detect_file_type "$current_file")
+        file_type_info=$(detect_file_type "$current_file")
+        file_type="${file_type_info%%:*}"
+        full_path="${file_type_info#*:}"
         
         case "$file_type" in
             asm)
-                print_color "green" "Found Assembly file: $current_file"
-                run_asm "$current_file" "$PROGRAM_ARGS"
+                print_color "green" "Found Assembly file: $full_path"
+                run_asm "$full_path" "$PROGRAM_ARGS"
                 return $?
                 ;;
             sh)
-                print_color "green" "Found shell script: $current_file"
-                run_sh "$current_file" "$PROGRAM_ARGS"
+                print_color "green" "Found shell script: $full_path"
+                run_sh "$full_path" "$PROGRAM_ARGS"
                 return $?
                 ;;
             binary)
-                print_color "green" "Found binary file: $current_file"
-                run_binary "$current_file" "$PROGRAM_ARGS"
+                print_color "green" "Found binary file: $full_path"
+                run_binary "$full_path" "$PROGRAM_ARGS"
                 return $?
                 ;;
             script)
-                print_color "green" "Found script file: $current_file"
-                # Run as executable script
-                print_color "blue" "========== SCRIPT OUTPUT =========="
-                "$current_file" $PROGRAM_ARGS
-                SCRIPT_EXIT=$?
-                print_color "blue" "==================================="
-                print_color "yellow" "Script exited with code: $SCRIPT_EXIT"
-                return $SCRIPT_EXIT
+                print_color "green" "Found script file: $full_path"
+                run_script "$full_path" "$PROGRAM_ARGS"
+                return $?
                 ;;
             not_found)
                 if [ $fallback_count -eq 0 ]; then
@@ -451,46 +488,30 @@ main() {
                     continue
                 else
                     print_color "red" "Error: File '$original_file' not found and no fallback available!"
-                    print_color "yellow" "Tried:"
-                    print_color "yellow" "  1. $original_file"
+                    print_color "yellow" "Searched in:"
+                    print_color "yellow" "  1. Caller directory: $CALLER_DIR"
+                    print_color "yellow" "  2. Script directory: $SCRIPT_DIR"
+                    print_color "yellow" "  3. Current directory"
                     
                     # Show what was tried
+                    print_color "yellow" "Tried file paths:"
+                    print_color "yellow" "  1. $original_file"
+                    
                     if [ -n "$alternative_file" ] && [ "$alternative_file" != "$original_file" ]; then
                         print_color "yellow" "  2. $alternative_file"
-                    fi
-                    
-                    # Show additional alternatives that might exist
-                    local basename="${original_file%.*}"
-                    if [ "$basename" != "$original_file" ]; then
-                        # Had extension
-                        if [ -f "${basename}.asm" ]; then
-                            print_color "yellow" "  (Note: ${basename}.asm exists)"
-                        fi
-                        if [ -f "${basename}.sh" ]; then
-                            print_color "yellow" "  (Note: ${basename}.sh exists)"
-                        fi
-                        if [ -f "${basename}" ]; then
-                            print_color "yellow" "  (Note: ${basename} exists)"
-                        fi
-                    else
-                        # No extension
-                        if [ -f "${original_file}.asm" ]; then
-                            print_color "yellow" "  (Note: ${original_file}.asm exists)"
-                        fi
-                        if [ -f "${original_file}.sh" ]; then
-                            print_color "yellow" "  (Note: ${original_file}.sh exists)"
-                        fi
                     fi
                     
                     exit 1
                 fi
                 ;;
             unknown)
-                print_color "yellow" "Unknown file type for: $current_file"
+                print_color "yellow" "Unknown file type for: $full_path"
                 print_color "yellow" "Attempting to execute anyway..."
                 
                 print_color "blue" "========== OUTPUT =========="
-                "$current_file" $PROGRAM_ARGS 2>/dev/null
+                
+                # Try to execute in caller's directory
+                (cd "$CALLER_DIR" && "$full_path" $PROGRAM_ARGS 2>/dev/null)
                 EXIT_CODE=$?
                 
                 if [ $EXIT_CODE -eq 126 ] || [ $EXIT_CODE -eq 127 ]; then
@@ -504,7 +525,7 @@ main() {
                         current_file="$alternative_file"
                         continue
                     else
-                        print_color "red" "No fallback available. Cannot execute: $current_file"
+                        print_color "red" "No fallback available. Cannot execute: $full_path"
                         exit 1
                     fi
                 else

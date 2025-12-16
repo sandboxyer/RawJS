@@ -25,7 +25,7 @@ section .data
     
     ; ========== COMMAND STRINGS ==========
     ; Global commands that must be in PATH
-    nasm_cmd db 'nasm', 0
+    basm_cmd db 'basm', 0
     node_cmd db 'node', 0
     bash_cmd db 'bash', 0
     min_asm_file db 'min.asm', 0
@@ -543,11 +543,11 @@ test_single_level:
     mov rsi, running_minify_msg
     call print_string
     
-    ; Build command: nasm min.asm <input_path>
+    ; Build command: basm min.asm <input_path>
     lea rdi, [cmd_buffer]
     
-    ; Add nasm command
-    lea rsi, [nasm_cmd]
+    ; Add basm command
+    lea rsi, [basm_cmd]
     call string_copy
     
     ; Add space
@@ -566,7 +566,7 @@ test_single_level:
     lea rsi, [input_path]
     call string_concatenate
     
-    ; Execute nasm command
+    ; Execute basm command
     lea rdi, [cmd_buffer]
     call execute_shell_command
     

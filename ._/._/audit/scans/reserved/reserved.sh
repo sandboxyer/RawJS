@@ -3,7 +3,7 @@
 # JavaScript Reserved Word Usage Auditor - Pure Bash Implementation
 # Usage: ./reserved.sh <filename.js> [--test]
 
-AUDIT_SCRIPT_VERSION="4.0.0"
+AUDIT_SCRIPT_VERSION="4.1.0"
 TEST_DIR="reserved_tests"
 
 # Color codes for output
@@ -184,37 +184,6 @@ get_token() {
     echo "$token"
 }
 
-# Function to decode Unicode escape sequences
-decode_unicode() {
-    local line="$1"
-    local decoded=""
-    local i=0
-    local len=${#line}
-    
-    while [ $i -lt $len ]; do
-        local char="${line:$i:1}"
-        if [ "$char" = '\' ] && [ $((i+1)) -lt $len ] && [ "${line:$((i+1)):1}" = 'u' ]; then
-            # Try to decode Unicode escape
-            if [ $((i+5)) -lt $len ]; then
-                local hex="${line:$((i+2)):4}"
-                if [[ "$hex" =~ ^[0-9a-fA-F]{4}$ ]]; then
-                    # Convert hex to decimal and then to character
-                    local dec=$((16#$hex))
-                    if [ $dec -lt 128 ]; then
-                        # ASCII character
-                        char=$(printf \\$(printf '%03o' $dec))
-                        i=$((i+5))
-                    fi
-                fi
-            fi
-        fi
-        decoded="${decoded}${char}"
-        ((i++))
-    done
-    
-    echo "$decoded"
-}
-
 # Function to check for reserved word usage errors
 check_reserved_word_usage() {
     local filename="$1"
@@ -248,17 +217,11 @@ check_reserved_word_usage() {
     local last_non_ws_token3=""
     local line_indent=""
     
-    # Check if file might be a module by looking for import/export at beginning
-    if head -n 5 "$filename" | grep -q -E "^\s*(import|export)"; then
-        is_module=true
-    fi
-    
     # Read file line by line
     while IFS= read -r line_raw || [ -n "$line_raw" ]; do
         ((line_number++))
         
-        # Decode Unicode escape sequences
-        local line=$(decode_unicode "$line_raw")
+        local line="$line_raw"
         local col=0
         local line_length=${#line}
         
@@ -275,8 +238,8 @@ check_reserved_word_usage() {
             strict_mode=true
         fi
         
-        # Check for module type
-        if [[ "$line" =~ ^[[:space:]]*(import|export|import\(|\/\/.*import|\/\/.*export) ]]; then
+        # Check for module type (import/export at top level)
+        if [ $line_number -le 5 ] && [[ "$line" =~ ^[[:space:]]*(import|export) ]]; then
             is_module=true
         fi
         
@@ -315,18 +278,18 @@ check_reserved_word_usage() {
                     elif [ "$next_char" = '*' ]; then
                         in_comment_multi=true
                         ((col++))
-                    elif [ "$last_non_ws_token" = "=" ] || [ "$last_non_ws_token" = "(" ] || 
-                         [ "$last_non_ws_token" = "," ] || [ "$last_non_ws_token" = ":" ] || 
-                         [ "$last_non_ws_token" = "[" ] || [ "$last_non_ws_token" = "?" ] ||
-                         [ "$last_non_ws_token" = "||" ] || [ "$last_non_ws_token" = "&&" ] ||
-                         [ "$last_non_ws_token" = "??" ] || [ "$last_non_ws_token" = "+" ] ||
-                         [ "$last_non_ws_token" = "-" ] || [ "$last_non_ws_token" = "*" ] ||
-                         [ "$last_non_ws_token" = "%" ] || [ "$last_non_ws_token" = "**" ] ||
-                         [ "$last_non_ws_token" = "!" ] || [ "$last_non_ws_token" = "~" ] ||
-                         [ "$last_non_ws_token" = "typeof" ] || [ "$last_non_ws_token" = "void" ] ||
-                         [ "$last_non_ws_token" = "delete" ] || [ "$last_non_ws_token" = "instanceof" ] ||
-                         [ "$last_non_ws_token" = "in" ] || [ "$last_non_ws_token" = "return" ] ||
-                         [ "$last_non_ws_token" = "yield" ] || [ "$last_non_ws_token" = "await" ] ||
+                    elif [ "$last_non_ws_token" = "=" ] || [ "$last_non_ws_token" = "(" ] || \
+                         [ "$last_non_ws_token" = "," ] || [ "$last_non_ws_token" = ":" ] || \
+                         [ "$last_non_ws_token" = "[" ] || [ "$last_non_ws_token" = "?" ] || \
+                         [ "$last_non_ws_token" = "||" ] || [ "$last_non_ws_token" = "&&" ] || \
+                         [ "$last_non_ws_token" = "??" ] || [ "$last_non_ws_token" = "+" ] || \
+                         [ "$last_non_ws_token" = "-" ] || [ "$last_non_ws_token" = "*" ] || \
+                         [ "$last_non_ws_token" = "%" ] || [ "$last_non_ws_token" = "**" ] || \
+                         [ "$last_non_ws_token" = "!" ] || [ "$last_non_ws_token" = "~" ] || \
+                         [ "$last_non_ws_token" = "typeof" ] || [ "$last_non_ws_token" = "void" ] || \
+                         [ "$last_non_ws_token" = "delete" ] || [ "$last_non_ws_token" = "instanceof" ] || \
+                         [ "$last_non_ws_token" = "in" ] || [ "$last_non_ws_token" = "return" ] || \
+                         [ "$last_non_ws_token" = "yield" ] || [ "$last_non_ws_token" = "await" ] || \
                          [ "$last_non_ws_token" = "throw" ]; then
                         # Likely regex
                         in_regex=true
@@ -373,8 +336,7 @@ check_reserved_word_usage() {
                         'async')
                             # Check if async is used as identifier
                             if [ "$last_non_ws_token" = "const" ] || [ "$last_non_ws_token" = "let" ] || \
-                               [ "$last_non_ws_token" = "var" ] || [ "$last_non_ws_token" = "class" ] || \
-                               [ "$last_non_ws_token" = "function" ]; then
+                               [ "$last_non_ws_token" = "var" ] || [ "$last_non_ws_token" = "class" ]; then
                                 # async as identifier - this is invalid
                                 echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'async' is a reserved word and cannot be used as an identifier${NC}"
                                 echo "  $line"
@@ -386,6 +348,9 @@ check_reserved_word_usage() {
                         '*')
                             if [ "$last_non_ws_token" = "function" ] || [ "$last_non_ws_token" = "async" ]; then
                                 in_generator=true
+                            elif $in_import_export && [ "$last_non_ws_token" = "import" ]; then
+                                # import * as ...
+                                :
                             fi
                             ;;
                         '=>')
@@ -418,13 +383,6 @@ check_reserved_word_usage() {
                             elif $in_import_export && $export_has_brackets; then
                                 # 'default' inside export {} is allowed
                                 :
-                            elif [ "$last_non_ws_token" = "=" ] && [ "$last_non_ws_token2" = "export" ]; then
-                                # export default = 5; - syntax error
-                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'export default' cannot be followed by '='${NC}"
-                                echo "  $line"
-                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                echo "$(realpath "$filename")"
-                                return 1
                             fi
                             ;;
                         '{')
@@ -531,191 +489,184 @@ check_reserved_word_usage() {
                     
                     # Check for reserved word usage errors
                     if is_reserved_word "$token"; then
-                        # Check specific reserved word contexts
-                        case "$token" in
-                            # Strict mode reserved words
-                            'implements'|'interface'|'package'|'private'|'protected'|'public'|'static'|'yield'|'eval'|'arguments')
-                                if $strict_mode && ([ "$last_non_ws_token" = "const" ] || \
-                                   [ "$last_non_ws_token" = "let" ] || [ "$last_non_ws_token" = "var" ] || \
-                                   [ "$last_non_ws_token" = "class" ] || [ "$last_non_ws_token" = "function" ]); then
+                        # Check for specific problematic cases
+                        
+                        # Case 1: yield outside generator function
+                        if [ "$token" = "yield" ] && ! $in_generator; then
+                            # Check if it's being used as a variable
+                            if [ "$last_non_ws_token" = "const" ] || [ "$last_non_ws_token" = "let" ] || \
+                               [ "$last_non_ws_token" = "var" ]; then
+                                if $strict_mode; then
+                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'yield' cannot be used as an identifier in strict mode${NC}"
+                                else
+                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'yield' is a reserved word and cannot be used as an identifier${NC}"
+                                fi
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            else
+                                # yield expression outside generator
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'yield' expression outside generator function${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                        fi
+                        
+                        # Case 2: export default with = (export default = 5)
+                        if $in_export_default && [ "$token" = "=" ]; then
+                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'export default' cannot be followed by '='${NC}"
+                            echo "  $line"
+                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                            echo "$(realpath "$filename")"
+                            return 1
+                        fi
+                        
+                        # Case 3: import * as reserved word
+                        if $in_import_export && [ "$last_non_ws_token2" = "*" ] && [ "$last_non_ws_token" = "as" ] && [ "$token" != "from" ]; then
+                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): '$token' cannot be used as import namespace${NC}"
+                            echo "  $line"
+                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                            echo "$(realpath "$filename")"
+                            return 1
+                        fi
+                        
+                        # Case 4: computed property with reserved word
+                        if $in_computed_property && [ "$last_non_ws_token" = "[" ] && \
+                           [[ "$token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] && \
+                           [[ ! "$token" =~ ^[\'\"] ]]; then
+                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): '$token' cannot be used in computed property${NC}"
+                            echo "  $line"
+                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                            echo "$(realpath "$filename")"
+                            return 1
+                        fi
+                        
+                        # Case 5: Reserved word as variable name
+                        if [ "$last_non_ws_token" = "const" ] || [ "$last_non_ws_token" = "let" ] || \
+                           [ "$last_non_ws_token" = "var" ] || [ "$last_non_ws_token" = "class" ] || \
+                           [ "$last_non_ws_token" = "function" ]; then
+                            # Exceptions where it's allowed
+                            local allowed=false
+                            
+                            # Exception 1: In import/export with 'as' rename
+                            if $in_import_export && $import_has_brackets && [ "$last_non_ws_token2" = "as" ]; then
+                                allowed=true
+                            fi
+                            
+                            # Exception 2: In object properties
+                            if $in_object_property && ! $in_computed_property; then
+                                allowed=true
+                            fi
+                            
+                            # Exception 3: Class method names
+                            if $in_class && $in_method && [ "$last_non_ws_token" != "class" ]; then
+                                allowed=true
+                            fi
+                            
+                            # Exception 4: Function parameters (non-strict mode)
+                            if $in_parameter_list && [ "$last_non_ws_token" = "(" ] && ! $strict_mode; then
+                                allowed=true
+                            fi
+                            
+                            # Exception 5: 'var' in non-strict mode with some words
+                            if [ "$last_non_ws_token" = "var" ] && ! $strict_mode && \
+                               ([ "$token" = "yield" ] || [ "$token" = "let" ]); then
+                                allowed=true
+                            fi
+                            
+                            # Exception 6: Export declarations
+                            if [ "$last_non_ws_token" = "export" ] && \
+                               ([ "$token" = "const" ] || [ "$token" = "let" ] || [ "$token" = "var" ] || [ "$token" = "class" ] || [ "$token" = "function" ]); then
+                                allowed=true
+                            fi
+                            
+                            if ! $allowed; then
+                                # Check for strict mode reserved words
+                                if $strict_mode && is_strict_reserved "$token"; then
                                     echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): '$token' is reserved in strict mode${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                    echo "$(realpath "$filename")"
-                                    return 1
-                                elif $strict_mode && $in_parameter_list; then
-                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): '$token' cannot be used as a parameter in strict mode${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                    echo "$(realpath "$filename")"
-                                    return 1
+                                else
+                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): '$token' is a reserved word and cannot be used as an identifier${NC}"
                                 fi
-                                ;;
-                                
-                            # Contextual reserved words
-                            'await')
-                                if [ "$last_non_ws_token" = "const" ] || [ "$last_non_ws_token" = "let" ] || \
-                                   [ "$last_non_ws_token" = "var" ] || [ "$last_non_ws_token" = "function" ]; then
-                                    # 'await' as identifier
-                                    if ! $in_async_function && ! $in_class && ! $in_method; then
-                                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'await' cannot be used as an identifier${NC}"
-                                        echo "  $line"
-                                        printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                        echo "$(realpath "$filename")"
-                                        return 1
-                                    fi
-                                elif ! $in_async_function && ! $is_module; then
-                                    # 'await' expression outside async context and not in module
-                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'await' expression outside async function${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                    echo "$(realpath "$filename")"
-                                    return 1
-                                elif ! $in_async_function && $is_module && ! $in_function; then
-                                    # Top-level await in module - allowed in ES2022+
-                                    # We'll still flag it as it's a recent feature
-                                    echo -e "${YELLOW}Warning at line $line_number, column $((col-token_length+2)): Top-level await in module (ES2022+)${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                        fi
+                        
+                        # Case 6: Class name that is reserved word
+                        if [ "$last_non_ws_token" = "class" ] && [ "$token" != "extends" ]; then
+                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): '$token' cannot be used as a class name${NC}"
+                            echo "  $line"
+                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                            echo "$(realpath "$filename")"
+                            return 1
+                        fi
+                        
+                        # Case 7: Import/export without rename
+                        if ($in_import_clause && $import_has_brackets) || ($in_export_named && $export_has_brackets) && \
+                           ([ "$last_non_ws_token" = "{" ] || [ "$last_non_ws_token" = "," ]) && \
+                           [ "$token" != "default" ]; then
+                            # Check if next token is 'as'
+                            local lookahead=$((col+1))
+                            local found_as=false
+                            while [ $lookahead -lt $line_length ]; do
+                                local next_tok=$(get_token "$line" $lookahead)
+                                if [ "$next_tok" = "as" ]; then
+                                    found_as=true
+                                    break
+                                elif [ "$next_tok" = "}" ] || [ "$next_tok" = "," ] || [ "$next_tok" = "from" ]; then
+                                    break
                                 fi
-                                ;;
-                                
-                            # Future reserved words (ES3/ES5)
-                            'abstract'|'boolean'|'byte'|'char'|'double'|'final'|'float'|'goto'|'int'|'long'|'native'|'short'|'synchronized'|'throws'|'transient'|'volatile')
-                                if $strict_mode && ([ "$last_non_ws_token" = "const" ] || \
-                                   [ "$last_non_ws_token" = "let" ] || [ "$last_non_ws_token" = "var" ]); then
-                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): '$token' is reserved in strict mode${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                    echo "$(realpath "$filename")"
-                                    return 1
-                                fi
-                                ;;
-                                
-                            # Regular reserved words as identifiers
-                            'class'|'const'|'function'|'let'|'var'|'if'|'else'|'while'|'for'|'switch'|'case'|'default'|'break'|'continue'|'return'|'throw'|'try'|'catch'|'finally'|'do'|'in'|'of'|'instanceof'|'typeof'|'void'|'delete'|'new'|'this'|'super'|'with'|'debugger'|'export'|'import'|'as'|'from'|'get'|'set'|'static'|'extends'|'enum'|'null'|'true'|'false'|'async'|'await'|'yield')
-                                # Check if reserved word is being used as an identifier
-                                if [ "$last_non_ws_token" = "const" ] || [ "$last_non_ws_token" = "let" ] || \
-                                   [ "$last_non_ws_token" = "var" ] || [ "$last_non_ws_token" = "class" ] || \
-                                   [ "$last_non_ws_token" = "function" ] || [ "$last_non_ws_token" = "async" ]; then
-                                    # Exception: 'async' before 'function' is valid
-                                    if [ "$token" = "async" ] && [ "$next_char" = " " ] && [[ "${line:$((col+1))}" =~ [[:space:]]*function ]]; then
-                                        # Valid async function declaration
-                                        :
-                                    # Exception: In object properties, reserved words are allowed
-                                    elif $in_object_property && ! $in_computed_property; then
-                                        # Valid as object property name
-                                        :
-                                    # Exception: In class definitions as method names
-                                    elif $in_class && $in_method && [ "$last_non_ws_token" != "class" ] && [ "$last_non_ws_token" != "static" ]; then
-                                        # Valid as class method name
-                                        :
-                                    # Exception: Function parameters (though bad practice)
-                                    elif $in_parameter_list && ([ "$last_non_ws_token" = "(" ] || [ "$last_non_ws_token" = "," ]); then
-                                        # Function parameters can be reserved words in non-strict mode
-                                        if $strict_mode && [ "$token" != "async" ] && [ "$token" != "get" ] && [ "$token" != "set" ]; then
-                                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): '$token' cannot be used as a parameter in strict mode${NC}"
-                                            echo "  $line"
-                                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                            echo "$(realpath "$filename")"
-                                            return 1
-                                        fi
-                                    # Exception: Import/export rename with 'as'
-                                    elif $in_import_export && $in_import_clause && [ "$last_non_ws_token2" = "as" ]; then
-                                        # Valid: import { x as class } from 'module'
-                                        :
-                                    # Exception: 'var' declarations in non-strict mode allow some reserved words
-                                    elif [ "$last_non_ws_token" = "var" ] && ! $strict_mode && \
-                                         ([ "$token" = "yield" ] || [ "$token" = "let" ]); then
-                                        # 'var yield' and 'var let' are allowed in non-strict mode
-                                        :
-                                    else
-                                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): '$token' is a reserved word and cannot be used as an identifier${NC}"
-                                        echo "  $line"
-                                        printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                        echo "$(realpath "$filename")"
-                                        return 1
-                                    fi
-                                # Check for class names that are reserved words
-                                elif [ "$last_non_ws_token" = "class" ] && [ "$token" != "extends" ]; then
-                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): '$token' cannot be used as a class name${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                    echo "$(realpath "$filename")"
-                                    return 1
-                                # Check for computed property with reserved word
-                                elif $in_computed_property && [ "$last_non_ws_token" = "[" ]; then
-                                    # Check if it's a string literal
-                                    if [[ ! "$token" =~ ^[\'\"] ]] && [[ ! "$token" =~ ^[0-9] ]]; then
-                                        # Check if it's a valid identifier that happens to be reserved
-                                        if [[ "$token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]]; then
-                                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): '$token' cannot be used in computed property${NC}"
-                                            echo "  $line"
-                                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                            echo "$(realpath "$filename")"
-                                            return 1
-                                        fi
-                                    fi
-                                # Check for export default syntax error
-                                elif $in_export_default && [ "$token" = "=" ]; then
-                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'export default' cannot be followed by '='${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                    echo "$(realpath "$filename")"
-                                    return 1
-                                # Check for export with reserved word
-                                elif $in_export_named && ([ "$token" = "const" ] || [ "$token" = "let" ] || [ "$token" = "var" ] || [ "$token" = "class" ] || [ "$token" = "function" ]); then
-                                    # export const/let/var/class/function is valid
-                                    in_export_named=false
-                                # Check for import namespace with reserved word
-                                elif $in_import_clause && [ "$last_non_ws_token2" = "*" ] && [ "$last_non_ws_token" = "as" ] && is_reserved_word "$token"; then
-                                    # import * as class from 'module' - invalid!
-                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): '$token' cannot be used as import namespace${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                    echo "$(realpath "$filename")"
-                                    return 1
-                                # Check for import/export with reserved words without rename
-                                elif ($in_import_clause && $import_has_brackets) || ($in_export_named && $export_has_brackets) && \
-                                     ([ "$last_non_ws_token" = "{" ] || [ "$last_non_ws_token" = "," ]) && \
-                                     is_reserved_word "$token" && [ "$token" != "default" ]; then
-                                    # Look ahead for 'as' keyword
-                                    local lookahead_col=$((col+1))
-                                    local found_as=false
-                                    local found_identifier=false
-                                    local found_from=false
-                                    local found_comma=false
-                                    local found_close=false
-                                    
-                                    while [ $lookahead_col -lt $line_length ]; do
-                                        local next_tok=$(get_token "$line" $lookahead_col)
-                                        if [ "$next_tok" = "as" ]; then
-                                            found_as=true
-                                            break
-                                        elif [ "$next_tok" = "from" ]; then
-                                            found_from=true
-                                            break
-                                        elif [ "$next_tok" = "}" ]; then
-                                            found_close=true
-                                            break
-                                        elif [ "$next_tok" = "," ]; then
-                                            found_comma=true
-                                            break
-                                        elif [[ "$next_tok" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] && [ "$next_tok" != "as" ]; then
-                                            found_identifier=true
-                                            break
-                                        fi
-                                        ((lookahead_col++))
-                                    done
-                                    
-                                    if ! $found_as && ($found_from || $found_close || $found_comma); then
-                                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Reserved word '$token' in import/export must be renamed with 'as'${NC}"
-                                        echo "  $line"
-                                        printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                        echo "$(realpath "$filename")"
-                                        return 1
-                                    fi
-                                fi
-                                ;;
-                        esac
+                                ((lookahead += ${#next_tok}))
+                            done
+                            
+                            if ! $found_as; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Reserved word '$token' in import/export must be renamed with 'as'${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
+                        fi
+                        
+                        # Case 8: Future reserved words in strict mode
+                        if $strict_mode && is_future_reserved "$token" && \
+                           ([ "$last_non_ws_token" = "const" ] || [ "$last_non_ws_token" = "let" ] || [ "$last_non_ws_token" = "var" ]); then
+                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): '$token' is reserved in strict mode${NC}"
+                            echo "  $line"
+                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                            echo "$(realpath "$filename")"
+                            return 1
+                        fi
+                        
+                        # Case 9: Function parameters in strict mode
+                        if $strict_mode && $in_parameter_list && [ "$last_non_ws_token" = "(" ] && \
+                           (is_strict_reserved "$token" || [ "$token" = "eval" ] || [ "$token" = "arguments" ]); then
+                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): '$token' cannot be used as a parameter in strict mode${NC}"
+                            echo "  $line"
+                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                            echo "$(realpath "$filename")"
+                            return 1
+                        fi
+                        
+                        # Case 10: await outside async context
+                        if [ "$token" = "await" ] && ! $in_async_function && ! $is_module; then
+                            # Check if it's being used as a variable
+                            if [ "$last_non_ws_token" = "const" ] || [ "$last_non_ws_token" = "let" ] || \
+                               [ "$last_non_ws_token" = "var" ] || [ "$last_non_ws_token" = "function" ]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'await' cannot be used as an identifier${NC}"
+                            else
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'await' expression outside async function${NC}"
+                            fi
+                            echo "  $line"
+                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                            echo "$(realpath "$filename")"
+                            return 1
+                        fi
                     fi
                     
                     # Update last non-whitespace token
@@ -844,12 +795,18 @@ run_tests() {
             # Check if this test is expected to pass or fail
             case "$filename" in
                 # These tests should pass (no errors expected)
-                *)
+                "53_extend_reserved.js"|"55_strict_mode_eval.js")
+                    # These actually have valid syntax
                     echo -e "${GREEN}  ✓ Passed as expected${NC}"
                     ((passed_tests++))
                     ;;
+                *)
+                    echo -e "${RED}  ✗ Should have failed but passed${NC}"
+                    ((failed_tests++))
+                    ;;
             esac
         else
+            # Test failed (which is expected for most tests)
             echo -e "${GREEN}  ✓ Correctly detected reserved word error${NC}"
             ((passed_tests++))
         fi
@@ -861,7 +818,7 @@ run_tests() {
     echo -e "${CYAN}Test Summary:${NC}"
     echo -e "  Total tests:  $total_tests"
     echo -e "  ${GREEN}Passed:        $passed_tests${NC}"
-    echo -e "  ${RED}Failed:        $((total_tests - passed_tests))${NC}"
+    echo -e "  ${RED}Failed:        $failed_tests${NC}"
     
     if [ "$total_tests" -eq 0 ]; then
         echo -e "${YELLOW}No test files found in '$TEST_DIR/'${NC}"

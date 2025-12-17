@@ -3,7 +3,7 @@
 # JavaScript Declaration Syntax Error Auditor
 # Usage: ./declaration.sh <filename.js> [--test]
 
-DECLARATION_SCRIPT_VERSION="6.0.0"
+DECLARATION_SCRIPT_VERSION="6.1.0"
 TEST_DIR="declaration_tests"
 
 # Color codes for output
@@ -422,6 +422,10 @@ check_arrow_function() {
         # Destructuring without parentheses - invalid
         echo -e "${RED}Error at line $line_num, column $((arrow_pos+1)): Destructuring parameters require parentheses in arrow functions${NC}"
         return 1
+    elif [ "$char" = "=" ]; then
+        # Arrow with no parameters
+        echo -e "${RED}Error at line $line_num, column $((arrow_pos+1)): Arrow function requires parameters${NC}"
+        return 1
     else
         # No valid parameter pattern found
         echo -e "${RED}Error at line $line_num, column $((arrow_pos+1)): Arrow function requires parameters${NC}"
@@ -492,6 +496,71 @@ check_export_conflict() {
     return 0
 }
 
+# Function to check for function redefinition in same scope
+check_function_redefinition() {
+    local line="$1"
+    local line_num="$2"
+    local col="$3"
+    local -n declared_vars_ref="$4"
+    local -n declared_funcs_ref="$5"
+    local current_scope="$6"
+    
+    # Check for function declaration
+    if [[ "$line" =~ ^[[:space:]]*function[[:space:]]+([a-zA-Z_$][a-zA-Z0-9_$]*)[[:space:]]*\( ]]; then
+        local func_name=$(echo "$line" | sed -n 's/^[[:space:]]*function[[:space:]]*\([a-zA-Z_$][a-zA-Z0-9_$]*\).*/\1/p')
+        
+        if [ -n "$func_name" ]; then
+            # Check if there's already a variable with same name in this scope
+            local var_key="${current_scope}_${func_name}"
+            if [ -n "${declared_vars_ref[$var_key]}" ]; then
+                echo -e "${RED}Error at line $line_num, column $((col+1)): Identifier '$func_name' has already been declared as variable${NC}"
+                return 1
+            fi
+        fi
+    fi
+    
+    # Check for variable declaration after function
+    if [[ "$line" =~ ^[[:space:]]*(var|let|const)[[:space:]]+([a-zAZ_$][a-zA-Z0-9_$]*) ]]; then
+        local var_name=$(echo "$line" | sed -n 's/^[[:space:]]*\(var\|let\|const\)[[:space:]]*\([a-zA-Z_$][a-zA-Z0-9_$]*\).*/\2/p')
+        
+        if [ -n "$var_name" ]; then
+            # Check if there's already a function with same name in this scope
+            local func_key="${current_scope}_${var_name}"
+            if [ -n "${declared_funcs_ref[$func_key]}" ]; then
+                echo -e "${RED}Error at line $line_num, column $((col+1)): Identifier '$var_name' has already been declared as function${NC}"
+                return 1
+            fi
+        fi
+    fi
+    
+    return 0
+}
+
+# Function to check for duplicate parameter in function body
+check_duplicate_param_var() {
+    local line="$1"
+    local line_num="$2"
+    local col="$3"
+    local func_name="$4"
+    local params="$5"
+    local -n declared_vars_ref="$6"
+    
+    # Extract variable names from line
+    if [[ "$line" =~ ^[[:space:]]*(let|const|var)[[:space:]]+([a-zA-Z_$][a-zA-Z0-9_$]*) ]]; then
+        local var_name=$(echo "$line" | sed -n 's/^[[:space:]]*\(let\|const\|var\)[[:space:]]*\([a-zA-Z_$][a-zA-Z0-9_$]*\).*/\2/p')
+        
+        if [ -n "$var_name" ]; then
+            # Check if this variable name is in function parameters
+            if [[ ",${params}," == *",${var_name},"* ]] || [[ "$params" == *"${var_name}"* ]]; then
+                echo -e "${RED}Error at line $line_num, column $((col+1)): Identifier '$var_name' has already been declared as parameter${NC}"
+                return 1
+            fi
+        fi
+    fi
+    
+    return 0
+}
+
 # Function to check declaration syntax errors
 check_declaration_syntax() {
     local filename="$1"
@@ -510,10 +579,11 @@ check_declaration_syntax() {
     declare -A declared_classes
     declare -A exported_vars
     declare -A function_params_map
+    declare -A function_params
     
     local in_function=false
     local function_name=""
-    local function_params=""
+    local function_params_str=""
     local in_class=false
     local class_name=""
     local class_has_constructor=false
@@ -550,6 +620,22 @@ check_declaration_syntax() {
         # Check for strict mode
         if check_strict_mode "$line"; then
             in_strict_mode=true
+        fi
+        
+        # Check for function redefinition issues BEFORE processing tokens
+        if $in_function && [ -n "$function_name" ] && [ "$current_scope" = "function:$function_name" ]; then
+            if ! check_function_redefinition "$line" "$line_number" 0 declared_vars declared_functions "$current_scope"; then
+                echo "  $line"
+                return 1
+            fi
+            
+            # Check for duplicate parameter/variable
+            if [ -n "$function_params_str" ] && [ "$function_params_str" != "()" ]; then
+                if ! check_duplicate_param_var "$line" "$line_number" 0 "$function_name" "$function_params_str" declared_vars; then
+                    echo "  $line"
+                    return 1
+                fi
+            fi
         fi
         
         # Process line character by character
@@ -833,6 +919,7 @@ check_declaration_syntax() {
                                     
                                     if [ $paren_count -eq 0 ]; then
                                         local params="${line:$param_start:$((param_end-param_start))}"
+                                        function_params_str="$params"
                                         
                                         # Check for duplicate parameters
                                         if ! check_duplicate_params "$params" "$line_number" $param_start; then
@@ -857,6 +944,7 @@ check_declaration_syntax() {
                                         
                                         # Store parameters for later checking
                                         function_params_map["$fn_name"]="$params"
+                                        function_params["$fn_name"]="$params"
                                     fi
                                 fi
                                 
@@ -1045,8 +1133,8 @@ check_declaration_syntax() {
                                 done
                                 
                                 if [ $check_pos -lt $line_length ]; then
-                                    local next_char="${line:$check_pos:1}"
-                                    if [ "$next_char" = "*" ]; then
+                                    # Check for constructor*() - generator constructor
+                                    if [ "${line:$check_pos:1}" = "*" ]; then
                                         echo -e "${RED}Error at line $line_number, column $((check_pos+1)): Constructor cannot be a generator${NC}"
                                         echo "  $line"
                                         printf "%*s^%s\n" $check_pos "" "${RED}here${NC}"
@@ -1459,6 +1547,7 @@ check_declaration_syntax() {
                 if [ $brace_count -gt 0 ]; then
                     in_function=false
                     function_name=""
+                    function_params_str=""
                     in_async_context=false
                     in_generator=false
                     scope_level=$((scope_level - 1))

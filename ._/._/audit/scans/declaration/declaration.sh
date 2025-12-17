@@ -3,7 +3,7 @@
 # JavaScript Declaration Syntax Error Auditor
 # Usage: ./declaration.sh <filename.js> [--test]
 
-DECLARATION_SCRIPT_VERSION="5.0.0"
+DECLARATION_SCRIPT_VERSION="6.0.0"
 TEST_DIR="declaration_tests"
 
 # Color codes for output
@@ -228,13 +228,12 @@ check_duplicate_declaration() {
     local scope_key="${scope}_${name}"
     
     if [ -n "${declared_ref[$scope_key]}" ]; then
-        if [ "$type" = "let" ] || [ "$type" = "const" ]; then
+        if [ "$type" = "let" ] || [ "$type" = "const" ] || [ "$type" = "function" ] || [ "$type" = "class" ]; then
             echo -e "${RED}Error at line $line_num, column $((col+1)): Identifier '$name' has already been declared${NC}"
             return 1
         elif [ "$type" = "var" ] && [ "$scope" = "global" ]; then
-            # var redeclaration in global scope is allowed but we should still warn
             local existing_type="${declared_ref[$scope_key]%%:*}"
-            if [ "$existing_type" = "let" ] || [ "$existing_type" = "const" ] || [ "$existing_type" = "function" ]; then
+            if [ "$existing_type" = "let" ] || [ "$existing_type" = "const" ] || [ "$existing_type" = "function" ] || [ "$existing_type" = "class" ]; then
                 echo -e "${RED}Error at line $line_num, column $((col+1)): Identifier '$name' has already been declared${NC}"
                 return 1
             fi
@@ -245,7 +244,6 @@ check_duplicate_declaration() {
     return 0
 }
 
-# Enhanced function to detect destructuring errors
 # Enhanced function to detect destructuring errors
 check_destructuring_pattern() {
     local line="$1"
@@ -290,6 +288,12 @@ check_destructuring_pattern() {
         return 1
     fi
     
+    # Array rest not last (fixed pattern)
+    if [[ "$remaining" =~ ^\[\ *[a-zA-Z_$][a-zA-Z0-9_$]*\ *,\ *\.\.\.\ *[a-zA-Z_$][a-zA-Z0-9_$]*\ *, ]]; then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): Rest element must be last element in array destructuring${NC}"
+        return 1
+    fi
+    
     return 0
 }
 
@@ -300,20 +304,25 @@ check_duplicate_params() {
     local col="$3"
     
     # Remove whitespace and parentheses
-    params=$(echo "$params" | tr -d '()' | tr -d ' ')
+    params=$(echo "$params" | tr -d '()')
     
     if [ -n "$params" ]; then
         local IFS=,
         local -A param_map
         for param in $params; do
             # Clean up the parameter (remove default values, destructuring, etc.)
-            local clean_param=$(echo "$param" | cut -d'=' -f1 | sed 's/[{}[]]//g')
+            local clean_param=$(echo "$param" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -d'=' -f1 | sed 's/^{//' | sed 's/}$//' | sed 's/^\[//' | sed 's/\]$//' | sed 's/\.\.\.//')
+            
+            # Extract just the parameter name if it's a destructuring pattern
+            if [[ "$clean_param" =~ : ]]; then
+                clean_param=$(echo "$clean_param" | cut -d':' -f2 | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+            fi
             
             if [ -n "$clean_param" ] && [ -n "${param_map[$clean_param]}" ]; then
                 echo -e "${RED}Error at line $line_num, column $((col+1)): Duplicate parameter name '$clean_param'${NC}"
                 return 1
             fi
-            param_map["$clean_param"]=1
+            [ -n "$clean_param" ] && param_map["$clean_param"]=1
         done
     fi
     return 0
@@ -331,8 +340,8 @@ check_rest_param() {
         return 1
     fi
     
-    # Check if rest parameter is not last
-    if [[ "$params" =~ ,[[:space:]]*\.\.\.[[:space:]]*[a-zA-Z_$][a-zA-Z0-9_$]*[[:space:]]*, ]]; then
+    # Check if rest parameter is not last (more accurate pattern)
+    if [[ "$params" =~ \.\.\.\ *[a-zA-Z_$][a-zA-Z0-9_$]*\ *, ]]; then
         echo -e "${RED}Error at line $line_num, column $((col+1)): Rest parameter must be last parameter${NC}"
         return 1
     fi
@@ -348,75 +357,79 @@ check_arrow_function() {
     
     # Check what's before the arrow
     local before_pos=$((arrow_pos-1))
-    local has_valid_params=false
-    local in_parens=false
     
     # Skip whitespace backwards
     while [ $before_pos -ge 0 ] && is_whitespace "${line:$before_pos:1}"; do
         ((before_pos--))
     done
     
-    if [ $before_pos -ge 0 ]; then
-        local char="${line:$before_pos:1}"
+    if [ $before_pos -lt 0 ]; then
+        echo -e "${RED}Error at line $line_num, column $((arrow_pos+1)): Arrow function requires parameters${NC}"
+        return 1
+    fi
+    
+    local char="${line:$before_pos:1}"
+    
+    # Check for various valid parameter patterns
+    if [ "$char" = ")" ]; then
+        # Parameters in parentheses - check if empty
+        local paren_count=1
+        local search_pos=$((before_pos-1))
+        local has_content=false
         
-        # Check for various valid parameter patterns
-        if [ "$char" = ")" ]; then
-            # Parameters in parentheses
-            local paren_count=1
-            local search_pos=$((before_pos-1))
-            
-            while [ $search_pos -ge 0 ]; do
-                local search_char="${line:$search_pos:1}"
-                if [ "$search_char" = ")" ]; then
-                    ((paren_count++))
-                elif [ "$search_char" = "(" ]; then
-                    ((paren_count--))
-                    if [ $paren_count -eq 0 ]; then
-                        has_valid_params=true
-                        break
+        while [ $search_pos -ge 0 ]; do
+            local search_char="${line:$search_pos:1}"
+            if [ "$search_char" = ")" ]; then
+                ((paren_count++))
+            elif [ "$search_char" = "(" ]; then
+                ((paren_count--))
+                if [ $paren_count -eq 0 ]; then
+                    # Check if there's any content between parentheses
+                    local content="${line:$((search_pos+1)):$((before_pos-search_pos-1))}"
+                    content=$(echo "$content" | tr -d ' ' | tr -d '\t')
+                    if [ -z "$content" ]; then
+                        echo -e "${RED}Error at line $line_num, column $((arrow_pos+1)): Arrow function requires parameters${NC}"
+                        return 1
                     fi
+                    return 0
                 fi
-                ((search_pos--))
-            done
-            
-            # Check if parentheses are empty
-            if $has_valid_params; then
-                local content="${line:$((search_pos+1)):$((before_pos-search_pos-1))}"
-                content=$(echo "$content" | tr -d ' ')
-                if [ -z "$content" ]; then
-                    echo -e "${RED}Error at line $line_num, column $((arrow_pos+1)): Arrow function requires parameters${NC}"
-                    return 1
-                fi
+            elif ! is_whitespace "$search_char" ]; then
+                has_content=true
             fi
-        elif is_valid_identifier_char "$char"; then
-            # Single identifier parameter
-            has_valid_params=true
-            
-            # Check for destructuring without parentheses
-            local search_back=$((before_pos-1))
-            while [ $search_back -ge 0 ] && is_whitespace "${line:$search_back:1}"; do
-                ((search_back--))
-            done
-            
-            if [ $search_back -ge 0 ] && [ "${line:$search_back:1}" = "{" ]; then
+            ((search_pos--))
+        done
+        
+        if ! $has_content; then
+            echo -e "${RED}Error at line $line_num, column $((arrow_pos+1)): Arrow function requires parameters${NC}"
+            return 1
+        fi
+    elif is_valid_identifier_char "$char"; then
+        # Single identifier parameter - check if it's actually destructuring
+        local search_back=$((before_pos-1))
+        while [ $search_back -ge 0 ] && is_whitespace "${line:$search_back:1}"; do
+            ((search_back--))
+        done
+        
+        if [ $search_back -ge 0 ]; then
+            local back_char="${line:$search_back:1}"
+            if [ "$back_char" = "{" ] || [ "$back_char" = "[" ]; then
                 echo -e "${RED}Error at line $line_num, column $((arrow_pos+1)): Destructuring parameters require parentheses in arrow functions${NC}"
                 return 1
             fi
-        elif [ "$char" = "}" ] || [ "$char" = "]" ]; then
-            # Destructuring without parentheses - invalid
-            echo -e "${RED}Error at line $line_num, column $((arrow_pos+1)): Destructuring parameters require parentheses in arrow functions${NC}"
-            return 1
         fi
-    fi
-    
-    if ! $has_valid_params; then
+        return 0
+    elif [ "$char" = "}" ] || [ "$char" = "]" ]; then
+        # Destructuring without parentheses - invalid
+        echo -e "${RED}Error at line $line_num, column $((arrow_pos+1)): Destructuring parameters require parentheses in arrow functions${NC}"
+        return 1
+    else
+        # No valid parameter pattern found
         echo -e "${RED}Error at line $line_num, column $((arrow_pos+1)): Arrow function requires parameters${NC}"
         return 1
     fi
     
     return 0
 }
-
 
 # Function to check for missing default values in function parameters
 check_param_default() {
@@ -434,6 +447,46 @@ check_param_default() {
     if [[ "$params" =~ \{[^}]*=[[:space:]]*[')',','] ]] || [[ "$params" =~ \[[^\]]*=[[:space:]]*[')',','] ]]; then
         echo -e "${RED}Error at line $line_num, column $((col+1)): Missing default value in destructuring parameter${NC}"
         return 1
+    fi
+    
+    return 0
+}
+
+# Function to check export conflicts
+check_export_conflict() {
+    local line="$1"
+    local line_num="$2"
+    local col="$3"
+    local -n exports_ref="$4"
+    
+    # Check for export { x } pattern
+    if [[ "$line" =~ export[[:space:]]*\{[^}]*\} ]]; then
+        local export_content=$(echo "$line" | sed -n 's/.*export[[:space:]]*{\([^}]*\)}.*/\1/p')
+        
+        # Extract variable names from export
+        local IFS=','
+        for item in $export_content; do
+            local var_name=$(echo "$item" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | sed 's/as.*//' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+            
+            if [ -n "$var_name" ] && [ -n "${exports_ref[$var_name]}" ]; then
+                echo -e "${RED}Error at line $line_num, column $((col+1)): Export conflict for '$var_name'${NC}"
+                return 1
+            fi
+            [ -n "$var_name" ] && exports_ref["$var_name"]="$line_num"
+        done
+    fi
+    
+    # Check for export let/const/var declarations
+    if [[ "$line" =~ export[[:space:]]+(let|const|var)[[:space:]]+ ]]; then
+        # Extract variable name after export declaration
+        local var_part=$(echo "$line" | sed -n 's/.*export[[:space:]]*\(let\|const\|var\)[[:space:]]*\([^=;,\[]*\).*/\2/p')
+        local var_name=$(echo "$var_part" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -d',' -f1 | cut -d'=' -f1)
+        
+        if [ -n "$var_name" ] && [ -n "${exports_ref[$var_name]}" ]; then
+            echo -e "${RED}Error at line $line_num, column $((col+1)): Export conflict for '$var_name'${NC}"
+            return 1
+        fi
+        [ -n "$var_name" ] && exports_ref["$var_name"]="$line_num"
     fi
     
     return 0
@@ -607,7 +660,7 @@ check_declaration_syntax() {
                             fi
                             
                             # Check for mixed declarations in for loop
-                            if $in_for_loop && [ "$decl_type" = "let" ]; then
+                            if $in_for_loop; then
                                 local check_back=$((col-1))
                                 local found_comma_before=false
                                 while [ $check_back -ge 0 ] && is_whitespace "${line:$check_back:1}"; do
@@ -623,7 +676,9 @@ check_declaration_syntax() {
                                     
                                     if [ $before_comma -ge 0 ]; then
                                         local before_token=$(get_token "$line" $before_comma)
-                                        if [ "$before_token" = "var" ] || [ "$before_token" = "const" ]; then
+                                        if [ "$decl_type" = "let" ] && { [ "$before_token" = "var" ] || [ "$before_token" = "const" ]; } ||
+                                           [ "$decl_type" = "const" ] && { [ "$before_token" = "var" ] || [ "$before_token" = "let" ]; } ||
+                                           [ "$decl_type" = "var" ] && { [ "$before_token" = "let" ] || [ "$before_token" = "const" ]; }; then
                                             echo -e "${RED}Error at line $line_number, column $((col+1)): Mixed declarations in for loop${NC}"
                                             echo "  $line"
                                             printf "%*s^%s\n" $col "" "${RED}here${NC}"
@@ -640,7 +695,7 @@ check_declaration_syntax() {
                             done
                             
                             if [ $name_pos -lt $line_length ]; then
-                                # Handle multiple variables (e.g., "let x = 5, y = 10")
+                                # Handle multiple variables
                                 local current_pos=$name_pos
                                 while [ $current_pos -lt $line_length ]; do
                                     # Extract variable name
@@ -672,12 +727,12 @@ check_declaration_syntax() {
                                         return 1
                                     fi
                                     
-                                    # Check if var is trying to redeclare let/const
-                                    if [ "$decl_type" = "var" ] && [ "$current_scope" = "global" ]; then
-                                        local scope_key="global_$var_name"
+                                    # Check if var is trying to redeclare let/const/function/class
+                                    if [ "$decl_type" = "var" ]; then
+                                        local scope_key="${current_scope}_$var_name"
                                         if [ -n "${declared_vars[$scope_key]}" ]; then
                                             local existing_type="${declared_vars[$scope_key]%%:*}"
-                                            if [ "$existing_type" = "let" ] || [ "$existing_type" = "const" ]; then
+                                            if [ "$existing_type" = "let" ] || [ "$existing_type" = "const" ] || [ "$existing_type" = "function" ] || [ "$existing_type" = "class" ]; then
                                                 echo -e "${RED}Error at line $line_number, column $((current_pos+1)): Cannot redeclare block-scoped variable '$var_name'${NC}"
                                                 echo "  $line"
                                                 printf "%*s^%s\n" $current_pos "" "${RED}here${NC}"
@@ -1014,14 +1069,20 @@ check_declaration_syntax() {
                             if $in_constructor && $class_extends; then
                                 # Check if super() has been called before this
                                 local found_super=false
-                                local current_check_line=0
                                 
                                 # Check current line before this position
                                 local check_pos=0
                                 while [ $check_pos -lt $col ]; do
                                     if [ "${line:$check_pos:5}" = "super" ]; then
-                                        found_super=true
-                                        break
+                                        # Check if super is followed by parentheses
+                                        local super_end=$((check_pos+5))
+                                        while [ $super_end -lt $line_length ] && is_whitespace "${line:$super_end:1}"; do
+                                            ((super_end++))
+                                        done
+                                        if [ $super_end -lt $line_length ] && [ "${line:$super_end:1}" = "(" ]; then
+                                            found_super=true
+                                            break
+                                        fi
                                     fi
                                     ((check_pos++))
                                 done
@@ -1083,7 +1144,7 @@ check_declaration_syntax() {
                                 fi
                                 
                                 # Check for mixed default and namespace imports
-                                if [ "$next_token" = "defaultExport" ] || [ "$next_token" = "default" ]; then
+                                if [ "$next_token" = "default" ] || [[ "$next_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]]; then
                                     local check_comma=$((next_pos + ${#next_token}))
                                     while [ $check_comma -lt $line_length ] && is_whitespace "${line:$check_comma:1}"; do
                                         ((check_comma++))
@@ -1157,19 +1218,20 @@ check_declaration_syntax() {
                                     done
                                     
                                     if [ $brace_count -eq 0 ]; then
-                                        local export_content="${line:$brace_pos:$((end_brace-brace_pos))}"
-                                        
                                         # Check for export conflicts
-                                        if [[ "$export_content" =~ [a-zA-Z_$][a-zA-Z0-9_$]* ]]; then
-                                            local exported_var="${BASH_REMATCH[0]}"
-                                            if [ -n "${exported_vars[$exported_var]}" ]; then
-                                                echo -e "${RED}Error at line $line_number, column $((brace_pos+1)): Export conflict for '$exported_var'${NC}"
-                                                echo "  $line"
-                                                printf "%*s^%s\n" $brace_pos "" "${RED}here${NC}"
-                                                return 1
-                                            fi
-                                            exported_vars["$exported_var"]="$line_number"
+                                        if ! check_export_conflict "$line" "$line_number" $brace_pos exported_vars; then
+                                            echo "  $line"
+                                            printf "%*s^%s\n" $brace_pos "" "${RED}here${NC}"
+                                            return 1
                                         fi
+                                    fi
+                                else
+                                    # Export of let/const/var declaration
+                                    # Check for export conflicts
+                                    if ! check_export_conflict "$line" "$line_number" $col exported_vars; then
+                                        echo "  $line"
+                                        printf "%*s^%s\n" $col "" "${RED}here${NC}"
+                                        return 1
                                     fi
                                 fi
                             fi
@@ -1379,6 +1441,43 @@ check_declaration_syntax() {
         # Reset arrow function flag
         if $in_arrow_function && [[ "$line" == *";"* ]] || [[ "$line" == *"}"* ]]; then
             in_arrow_function=false
+        fi
+        
+        # Reset function scope if we see closing brace at function level
+        if $in_function && [ "$scope_level" -gt 0 ]; then
+            if [[ "$line" == *"}"* ]] && [[ "$line" != *"{"* ]]; then
+                # Count braces to see if we're exiting function scope
+                local brace_count=0
+                for ((i=0; i<${#line}; i++)); do
+                    if [ "${line:$i:1}" = "}" ]; then
+                        ((brace_count++))
+                    elif [ "${line:$i:1}" = "{" ]; then
+                        ((brace_count--))
+                    fi
+                done
+                
+                if [ $brace_count -gt 0 ]; then
+                    in_function=false
+                    function_name=""
+                    in_async_context=false
+                    in_generator=false
+                    scope_level=$((scope_level - 1))
+                    current_scope="global"
+                fi
+            fi
+        fi
+        
+        # Reset class scope if we see closing brace at class level
+        if $in_class && [ "$scope_level" -gt 0 ]; then
+            if [[ "$line" == *"}"* ]] && [[ "$line" != *"{"* ]]; then
+                in_class=false
+                class_name=""
+                class_extends=false
+                class_parent=""
+                class_has_constructor=false
+                scope_level=$((scope_level - 1))
+                current_scope="global"
+            fi
         fi
         
     done

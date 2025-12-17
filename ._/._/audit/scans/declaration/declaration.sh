@@ -3,7 +3,7 @@
 # JavaScript Declaration Syntax Error Auditor
 # Usage: ./declaration.sh <filename.js> [--test]
 
-DECLARATION_SCRIPT_VERSION="3.0.0"
+DECLARATION_SCRIPT_VERSION="4.0.0"
 TEST_DIR="declaration_tests"
 
 # Color codes for output
@@ -222,22 +222,87 @@ check_duplicate_declaration() {
     local name="$2"
     local type="$3"
     local line_num="$4"
-    local -n declared_ref="$5"
+    local col="$5"
+    local -n declared_ref="$6"
     
     local scope_key="${scope}_${name}"
     
     if [ -n "${declared_ref[$scope_key]}" ]; then
-        local existing="${declared_ref[$scope_key]}"
         if [ "$type" = "let" ] || [ "$type" = "const" ]; then
-            echo -e "${RED}Error at line $line_num, column 1: Identifier '$name' has already been declared${NC}"
+            echo -e "${RED}Error at line $line_num, column $((col+1)): Identifier '$name' has already been declared${NC}"
             return 1
-        elif [ "$type" = "function" ] && [[ "$existing" == function:* ]]; then
-            # Function redeclaration might be OK, but not with var
-            return 0
+        elif [ "$type" = "var" ] && [ "$scope" = "global" ]; then
+            # var redeclaration in global scope is allowed but we should still warn
+            local existing_type="${declared_ref[$scope_key]%%:*}"
+            if [ "$existing_type" = "let" ] || [ "$existing_type" = "const" ] || [ "$existing_type" = "function" ]; then
+                echo -e "${RED}Error at line $line_num, column $((col+1)): Identifier '$name' has already been declared${NC}"
+                return 1
+            fi
         fi
     fi
     
     declared_ref["$scope_key"]="${type}:${line_num}"
+    return 0
+}
+
+# Enhanced function to detect destructuring errors
+check_destructuring_pattern() {
+    local line="$1"
+    local pos="$2"
+    local line_num="$3"
+    local length=${#line}
+    
+    # Check for specific destructuring errors
+    local remaining="${line:$pos}"
+    
+    # Object destructuring errors
+    if [[ "$remaining" =~ ^\{\ *[a-zA-Z_$][a-zA-Z0-9_$]*\ *:\ *\} ]]; then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid destructuring pattern (missing property name)${NC}"
+        return 1
+    fi
+    
+    if [[ "$remaining" =~ ^\{\ *:\ *[a-zA-Z_$][a-zA-Z0-9_$]*\ *\} ]]; then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid destructuring pattern (missing key)${NC}"
+        return 1
+    fi
+    
+    if [[ "$remaining" =~ ^\{\ *[a-zA-Z_$][a-zA-Z0-9_$]*\ *=\ *\} ]]; then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid destructuring pattern (missing default value)${NC}"
+        return 1
+    fi
+    
+    # Check for rest operator not last
+    if [[ "$remaining" =~ \.\.\.\ *[a-zA-Z_$][a-zA-Z0-9_$]*\ *, ]]; then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): Rest element must be last element${NC}"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Enhanced function to check for duplicate function parameters
+check_duplicate_params() {
+    local params="$1"
+    local line_num="$2"
+    local col="$3"
+    
+    # Remove whitespace and parentheses
+    params=$(echo "$params" | tr -d '()' | tr -d ' ')
+    
+    if [ -n "$params" ]; then
+        local IFS=,
+        local -A param_map
+        for param in $params; do
+            # Clean up the parameter (remove default values, destructuring, etc.)
+            local clean_param=$(echo "$param" | cut -d'=' -f1 | tr -d '{[' | tr -d '}]')
+            
+            if [ -n "$clean_param" ] && [ -n "${param_map[$clean_param]}" ]; then
+                echo -e "${RED}Error at line $line_num, column $((col+1)): Duplicate parameter name '$clean_param'${NC}"
+                return 1
+            fi
+            param_map["$clean_param"]=1
+        done
+    fi
     return 0
 }
 
@@ -254,13 +319,14 @@ check_declaration_syntax() {
     # Scope tracking
     local current_scope="global"
     local scope_level=0
-    declare -A declared_vars  # Hash for variables per scope
+    declare -A declared_vars
     declare -A declared_functions
     declare -A declared_classes
+    declare -A exported_vars
     
     local in_function=false
     local function_name=""
-    local function_params=()
+    local function_params=""
     local in_class=false
     local class_name=""
     local class_has_constructor=false
@@ -278,6 +344,7 @@ check_declaration_syntax() {
     local in_export=false
     local in_import=false
     local in_constructor=false
+    local in_function_params=false
     
     # Track recent declarations
     local last_declaration=""
@@ -352,6 +419,23 @@ check_declaration_syntax() {
                         'let'|'const'|'var')
                             local decl_type="$token"
                             local decl_line=$line_number
+                            local decl_col=$col
+                            
+                            # Track for mixed declarations
+                            if [ -n "$last_declaration" ] && [ "$last_declaration_type" = "$decl_type" ] && [ "$last_declaration_line" = "$decl_line" ]; then
+                                # Check if this is a mixed declaration attempt
+                                local check_pos=$((col-1))
+                                while [ $check_pos -ge 0 ] && is_whitespace "${line:$check_pos:1}"; do
+                                    ((check_pos--))
+                                done
+                                
+                                if [ $check_pos -ge 0 ] && [ "${line:$check_pos:1}" = "," ]; then
+                                    echo -e "${RED}Error at line $line_number, column $((col+1)): Mixed declarations in single statement${NC}"
+                                    echo "  $line"
+                                    printf "%*s^%s\n" $col "" "${RED}here${NC}"
+                                    return 1
+                                fi
+                            fi
                             
                             if [ "$decl_type" = "const" ]; then
                                 # Check for const without initializer
@@ -447,10 +531,24 @@ check_declaration_syntax() {
                                     fi
                                     
                                     # Check for duplicate declaration in same scope
-                                    if ! check_duplicate_declaration "$current_scope" "$var_name" "$decl_type" "$line_number" declared_vars; then
+                                    if ! check_duplicate_declaration "$current_scope" "$var_name" "$decl_type" "$line_number" $current_pos declared_vars; then
                                         echo "  $line"
                                         printf "%*s^%s\n" $current_pos "" "${RED}here${NC}"
                                         return 1
+                                    fi
+                                    
+                                    # Check if var is trying to redeclare let/const
+                                    if [ "$decl_type" = "var" ] && [ "$current_scope" = "global" ]; then
+                                        local scope_key="global_$var_name"
+                                        if [ -n "${declared_vars[$scope_key]}" ]; then
+                                            local existing_type="${declared_vars[$scope_key]%%:*}"
+                                            if [ "$existing_type" = "let" ] || [ "$existing_type" = "const" ]; then
+                                                echo -e "${RED}Error at line $line_number, column $((current_pos+1)): Cannot redeclare block-scoped variable '$var_name'${NC}"
+                                                echo "  $line"
+                                                printf "%*s^%s\n" $current_pos "" "${RED}here${NC}"
+                                                return 1
+                                            fi
+                                        fi
                                     fi
                                     
                                     # Move past the variable name
@@ -484,6 +582,10 @@ check_declaration_syntax() {
                                     fi
                                 done
                             fi
+                            
+                            last_declaration="$var_name"
+                            last_declaration_type="$decl_type"
+                            last_declaration_line=$line_number
                             ;;
                             
                         # Function declarations
@@ -517,6 +619,38 @@ check_declaration_syntax() {
                                     echo "  $line"
                                     printf "%*s^%s\n" $name_pos "" "${RED}here${NC}"
                                     return 1
+                                fi
+                                
+                                # Look for parameters
+                                local param_start=$((name_pos + ${#fn_name}))
+                                while [ $param_start -lt $line_length ] && [ "${line:$param_start:1}" != "(" ]; do
+                                    ((param_start++))
+                                done
+                                
+                                if [ $param_start -lt $line_length ]; then
+                                    local param_end=$param_start
+                                    local paren_count=1
+                                    ((param_end++))
+                                    
+                                    while [ $param_end -lt $line_length ] && [ $paren_count -gt 0 ]; do
+                                        if [ "${line:$param_end:1}" = "(" ]; then
+                                            ((paren_count++))
+                                        elif [ "${line:$param_end:1}" = ")" ]; then
+                                            ((paren_count--))
+                                        fi
+                                        ((param_end++))
+                                    done
+                                    
+                                    if [ $paren_count -eq 0 ]; then
+                                        local params="${line:$param_start:$((param_end-param_start))}"
+                                        
+                                        # Check for duplicate parameters
+                                        if ! check_duplicate_params "$params" "$line_number" $param_start; then
+                                            echo "  $line"
+                                            printf "%*s^%s\n" $param_start "" "${RED}here${NC}"
+                                            return 1
+                                        fi
+                                    fi
                                 fi
                                 
                                 # Enter function scope
@@ -675,7 +809,7 @@ check_declaration_syntax() {
                                 scope_level=$((scope_level + 1))
                                 
                                 # Check for duplicate class declaration
-                                if [ -n "${declared_classes[$cls_name]}" ]; then
+                                if [ -n "${declared_classes[$cls_name]}" ] && [ "$current_scope" = "global" ]; then
                                     echo -e "${RED}Error at line $line_number, column $((name_pos+1)): Identifier '$cls_name' has already been declared${NC}"
                                     echo "  $line"
                                     printf "%*s^%s\n" $name_pos "" "${RED}here${NC}"
@@ -854,12 +988,50 @@ check_declaration_syntax() {
                                     echo "  $line"
                                     printf "%*s^%s\n" $next_pos "" "${RED}here${NC}"
                                     return 1
+                                elif [ "$next_token" = "{" ]; then
+                                    # Handle export { x } from "module"
+                                    local brace_pos=$next_pos
+                                    local end_brace=$brace_pos
+                                    local brace_count=1
+                                    ((end_brace++))
+                                    
+                                    while [ $end_brace -lt $line_length ] && [ $brace_count -gt 0 ]; do
+                                        if [ "${line:$end_brace:1}" = "{" ]; then
+                                            ((brace_count++))
+                                        elif [ "${line:$end_brace:1}" = "}" ]; then
+                                            ((brace_count--))
+                                        fi
+                                        ((end_brace++))
+                                    done
+                                    
+                                    if [ $brace_count -eq 0 ]; then
+                                        local export_content="${line:$brace_pos:$((end_brace-brace_pos))}"
+                                        
+                                        # Check for export conflicts
+                                        if [[ "$export_content" =~ [a-zA-Z_$][a-zA-Z0-9_$]* ]]; then
+                                            local exported_var="${BASH_REMATCH[0]}"
+                                            if [ -n "${exported_vars[$exported_var]}" ]; then
+                                                echo -e "${RED}Error at line $line_number, column $((brace_pos+1)): Export conflict for '$exported_var'${NC}"
+                                                echo "  $line"
+                                                printf "%*s^%s\n" $brace_pos "" "${RED}here${NC}"
+                                                return 1
+                                            fi
+                                            exported_vars["$exported_var"]="$line_number"
+                                        fi
+                                    fi
                                 fi
                             fi
                             ;;
                             
                         # Check for destructuring errors
                         '{')
+                            # Check destructuring patterns
+                            if ! check_destructuring_pattern "$line" $col $line_number; then
+                                echo "  $line"
+                                printf "%*s^%s\n" $col "" "${RED}here${NC}"
+                                return 1
+                            fi
+                            
                             local check_pos=$((col-1))
                             local is_destructuring=false
                             
@@ -875,17 +1047,6 @@ check_declaration_syntax() {
                                    [ "$prev_char" = ":" ] || [ "$prev_char" = "}" ]; then
                                     is_destructuring=true
                                     in_destructuring=true
-                                fi
-                            fi
-                            
-                            if $is_destructuring; then
-                                # Check for invalid destructuring patterns in this line
-                                if [[ "$line" == *"{ x: }"* ]] || [[ "$line" == *"{ :y }"* ]] || 
-                                   [[ "$line" == *"{ x = }"* ]] || [[ "$line" == *"{ x, ...y, z }"* ]]; then
-                                    echo -e "${RED}Error at line $line_number, column $((col+1)): Invalid destructuring pattern${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $col "" "${RED}here${NC}"
-                                    return 1
                                 fi
                             fi
                             ;;
@@ -1045,6 +1206,15 @@ check_declaration_syntax() {
             in_constructor=false
         fi
         
+        # Reset export/import flags at end of line
+        if $in_export && [[ "$line" == *";"* ]]; then
+            in_export=false
+        fi
+        
+        if $in_import && [[ "$line" == *";"* ]]; then
+            in_import=false
+        fi
+        
     done
     
     # Final checks
@@ -1157,19 +1327,9 @@ run_declaration_tests() {
         # Run audit on test file
         if audit_declaration_file "$test_file" 2>/dev/null; then
             # Check if this test is expected to pass or fail
-            # Most test files should fail, but some edge cases might pass
-            case "$filename" in
-                # These tests might actually be valid in some contexts
-                46_variable_after_function.js)
-                    # This is actually invalid in strict mode, should fail
-                    echo -e "${RED}  ✗ Expected to fail but passed${NC}"
-                    ((failed_tests++))
-                    ;;
-                *)
-                    echo -e "${RED}  ✗ Expected to fail but passed${NC}"
-                    ((failed_tests++))
-                    ;;
-            esac
+            # All test files should fail except possibly some edge cases
+            echo -e "${RED}  ✗ Expected to fail but passed${NC}"
+            ((failed_tests++))
         else
             echo -e "${GREEN}  ✓ Correctly detected declaration error${NC}"
             ((passed_tests++))

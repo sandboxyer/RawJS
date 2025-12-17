@@ -3,7 +3,7 @@
 # JavaScript Declaration Syntax Error Auditor
 # Usage: ./declaration.sh <filename.js> [--test]
 
-DECLARATION_SCRIPT_VERSION="4.0.0"
+DECLARATION_SCRIPT_VERSION="5.0.0"
 TEST_DIR="declaration_tests"
 
 # Color codes for output
@@ -246,11 +246,12 @@ check_duplicate_declaration() {
 }
 
 # Enhanced function to detect destructuring errors
+# Enhanced function to detect destructuring errors
 check_destructuring_pattern() {
     local line="$1"
     local pos="$2"
     local line_num="$3"
-    local length=${#line}
+    local length="${#line}"
     
     # Check for specific destructuring errors
     local remaining="${line:$pos}"
@@ -277,6 +278,18 @@ check_destructuring_pattern() {
         return 1
     fi
     
+    # Array destructuring with ellipsis only
+    if [[ "$remaining" =~ ^\[\ *\.\.\.\ *\] ]]; then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid array destructuring pattern${NC}"
+        return 1
+    fi
+    
+    # Array destructuring with missing default
+    if [[ "$remaining" =~ ^\[\ *[a-zA-Z_$][a-zA-Z0-9_$]*\ *=\ *\] ]]; then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): Missing default value in array destructuring${NC}"
+        return 1
+    fi
+    
     return 0
 }
 
@@ -294,7 +307,7 @@ check_duplicate_params() {
         local -A param_map
         for param in $params; do
             # Clean up the parameter (remove default values, destructuring, etc.)
-            local clean_param=$(echo "$param" | cut -d'=' -f1 | tr -d '{[' | tr -d '}]')
+            local clean_param=$(echo "$param" | cut -d'=' -f1 | sed 's/[{}[]]//g')
             
             if [ -n "$clean_param" ] && [ -n "${param_map[$clean_param]}" ]; then
                 echo -e "${RED}Error at line $line_num, column $((col+1)): Duplicate parameter name '$clean_param'${NC}"
@@ -303,6 +316,126 @@ check_duplicate_params() {
             param_map["$clean_param"]=1
         done
     fi
+    return 0
+}
+
+# Function to check for function rest parameter errors
+check_rest_param() {
+    local params="$1"
+    local line_num="$2"
+    local col="$3"
+    
+    # Check for empty rest parameter
+    if [[ "$params" == *"..."*"..."* ]] || [[ "$params" == *"..."*"=..."* ]] || [[ "$params" == *"...)"* ]]; then
+        echo -e "${RED}Error at line $line_num, column $((col+1)): Invalid rest parameter${NC}"
+        return 1
+    fi
+    
+    # Check if rest parameter is not last
+    if [[ "$params" =~ ,[[:space:]]*\.\.\.[[:space:]]*[a-zA-Z_$][a-zA-Z0-9_$]*[[:space:]]*, ]]; then
+        echo -e "${RED}Error at line $line_num, column $((col+1)): Rest parameter must be last parameter${NC}"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Function to check arrow function parameters
+check_arrow_function() {
+    local line="$1"
+    local arrow_pos="$2"
+    local line_num="$3"
+    
+    # Check what's before the arrow
+    local before_pos=$((arrow_pos-1))
+    local has_valid_params=false
+    local in_parens=false
+    
+    # Skip whitespace backwards
+    while [ $before_pos -ge 0 ] && is_whitespace "${line:$before_pos:1}"; do
+        ((before_pos--))
+    done
+    
+    if [ $before_pos -ge 0 ]; then
+        local char="${line:$before_pos:1}"
+        
+        # Check for various valid parameter patterns
+        if [ "$char" = ")" ]; then
+            # Parameters in parentheses
+            local paren_count=1
+            local search_pos=$((before_pos-1))
+            
+            while [ $search_pos -ge 0 ]; do
+                local search_char="${line:$search_pos:1}"
+                if [ "$search_char" = ")" ]; then
+                    ((paren_count++))
+                elif [ "$search_char" = "(" ]; then
+                    ((paren_count--))
+                    if [ $paren_count -eq 0 ]; then
+                        has_valid_params=true
+                        break
+                    fi
+                fi
+                ((search_pos--))
+            done
+            
+            # Check if parentheses are empty
+            if $has_valid_params; then
+                local content="${line:$((search_pos+1)):$((before_pos-search_pos-1))}"
+                content=$(echo "$content" | tr -d ' ')
+                if [ -z "$content" ]; then
+                    echo -e "${RED}Error at line $line_num, column $((arrow_pos+1)): Arrow function requires parameters${NC}"
+                    return 1
+                fi
+            fi
+        elif is_valid_identifier_char "$char"; then
+            # Single identifier parameter
+            has_valid_params=true
+            
+            # Check for destructuring without parentheses
+            local search_back=$((before_pos-1))
+            while [ $search_back -ge 0 ] && is_whitespace "${line:$search_back:1}"; do
+                ((search_back--))
+            done
+            
+            if [ $search_back -ge 0 ] && [ "${line:$search_back:1}" = "{" ]; then
+                echo -e "${RED}Error at line $line_num, column $((arrow_pos+1)): Destructuring parameters require parentheses in arrow functions${NC}"
+                return 1
+            fi
+        elif [ "$char" = "}" ] || [ "$char" = "]" ]; then
+            # Destructuring without parentheses - invalid
+            echo -e "${RED}Error at line $line_num, column $((arrow_pos+1)): Destructuring parameters require parentheses in arrow functions${NC}"
+            return 1
+        fi
+    fi
+    
+    if ! $has_valid_params; then
+        echo -e "${RED}Error at line $line_num, column $((arrow_pos+1)): Arrow function requires parameters${NC}"
+        return 1
+    fi
+    
+    return 0
+}
+
+
+# Function to check for missing default values in function parameters
+check_param_default() {
+    local params="$1"
+    local line_num="$2"
+    local col="$3"
+    
+    # Check for parameter with = but no value
+    if [[ "$params" =~ [a-zA-Z_$][a-zA-Z0-9_$]*[[:space:]]*=[[:space:]]*[')',','] ]]; then
+        echo -e "${RED}Error at line $line_num, column $((col+1)): Missing default value in parameter${NC}"
+        return 1
+    fi
+    
+    # Check for destructuring with missing default
+    if [[ "$params" =~ \{[^}]*=[[:space:]]*[')',','] ]] || [[ "$params" =~ \[[^\]]*=[[:space:]]*[')',','] ]]; then
+        echo -e "${RED}Error at line $line_num, column $((col+1)): Missing default value in destructuring parameter${NC}"
+        return 1
+    fi
+    
     return 0
 }
 
@@ -323,6 +456,7 @@ check_declaration_syntax() {
     declare -A declared_functions
     declare -A declared_classes
     declare -A exported_vars
+    declare -A function_params_map
     
     local in_function=false
     local function_name=""
@@ -345,6 +479,7 @@ check_declaration_syntax() {
     local in_import=false
     local in_constructor=false
     local in_function_params=false
+    local current_function_params=""
     
     # Track recent declarations
     local last_declaration=""
@@ -650,6 +785,23 @@ check_declaration_syntax() {
                                             printf "%*s^%s\n" $param_start "" "${RED}here${NC}"
                                             return 1
                                         fi
+                                        
+                                        # Check for rest parameter errors
+                                        if ! check_rest_param "$params" "$line_number" $param_start; then
+                                            echo "  $line"
+                                            printf "%*s^%s\n" $param_start "" "${RED}here${NC}"
+                                            return 1
+                                        fi
+                                        
+                                        # Check for missing default values
+                                        if ! check_param_default "$params" "$line_number" $param_start; then
+                                            echo "  $line"
+                                            printf "%*s^%s\n" $param_start "" "${RED}here${NC}"
+                                            return 1
+                                        fi
+                                        
+                                        # Store parameters for later checking
+                                        function_params_map["$fn_name"]="$params"
                                     fi
                                 fi
                                 
@@ -1052,6 +1204,13 @@ check_declaration_syntax() {
                             ;;
                             
                         '[')
+                            # Check destructuring patterns for arrays
+                            if ! check_destructuring_pattern "$line" $col $line_number; then
+                                echo "  $line"
+                                printf "%*s^%s\n" $col "" "${RED}here${NC}"
+                                return 1
+                            fi
+                            
                             local check_pos=$((col-1))
                             local is_destructuring=false
                             
@@ -1068,49 +1227,16 @@ check_declaration_syntax() {
                                     in_destructuring=true
                                 fi
                             fi
-                            
-                            if $is_destructuring; then
-                                # Check for invalid array destructuring patterns
-                                if [[ "$line" == *"[ ... ]"* ]] || [[ "$line" == *"[ x = ]"* ]] || 
-                                   [[ "$line" == *"[ x, ...y, z ]"* ]]; then
-                                    echo -e "${RED}Error at line $line_number, column $((col+1)): Invalid array destructuring pattern${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $col "" "${RED}here${NC}"
-                                    return 1
-                                fi
-                            fi
                             ;;
                             
                         # Check for arrow function errors
                         '=>')
-                            local before_pos=$((col-1))
-                            local has_params=false
-                            
-                            # Check what's before the =>
-                            while [ $before_pos -ge 0 ] && is_whitespace "${line:$before_pos:1}"; do
-                                ((before_pos--))
-                            done
-                            
-                            if [ $before_pos -ge 0 ]; then
-                                if [ "${line:$before_pos:1}" = ")" ]; then
-                                    has_params=true
-                                elif [ "${line:$before_pos:1}" = "}" ] || [ "${line:$before_pos:1}" = "]" ]; then
-                                    # Destructuring without parentheses - invalid
-                                    echo -e "${RED}Error at line $line_number, column $((col+1)): Arrow function with destructuring requires parentheses${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $col "" "${RED}here${NC}"
-                                    return 1
-                                elif is_valid_identifier_char "${line:$before_pos:1}"; then
-                                    has_params=true
-                                fi
-                            fi
-                            
-                            if ! $has_params; then
-                                echo -e "${RED}Error at line $line_number, column $((col+1)): Arrow function requires parameters${NC}"
+                            if ! check_arrow_function "$line" $col $line_number; then
                                 echo "  $line"
                                 printf "%*s^%s\n" $col "" "${RED}here${NC}"
                                 return 1
                             fi
+                            in_arrow_function=true
                             ;;
                             
                         # For loop handling
@@ -1176,6 +1302,41 @@ check_declaration_syntax() {
                                 fi
                             fi
                             ;;
+                            
+                        # Check for label on declaration
+                        ':')
+                            local before_pos=$((col-1))
+                            while [ $before_pos -ge 0 ] && is_whitespace "${line:$before_pos:1}"; do
+                                ((before_pos--))
+                            done
+                            
+                            if [ $before_pos -ge 0 ]; then
+                                local label_start=$before_pos
+                                while [ $label_start -ge 0 ] && is_valid_identifier_char "${line:$label_start:1}"; do
+                                    ((label_start--))
+                                done
+                                ((label_start++))
+                                
+                                local label="${line:$label_start:$((before_pos-label_start+1))}"
+                                
+                                # Check if this label is followed by a declaration
+                                local after_pos=$((col+1))
+                                while [ $after_pos -lt $line_length ] && is_whitespace "${line:$after_pos:1}"; do
+                                    ((after_pos++))
+                                done
+                                
+                                if [ $after_pos -lt $line_length ]; then
+                                    local next_token=$(get_token "$line" $after_pos)
+                                    if [ "$next_token" = "let" ] || [ "$next_token" = "const" ] || [ "$next_token" = "var" ] || 
+                                       [ "$next_token" = "function" ] || [ "$next_token" = "class" ]; then
+                                        echo -e "${RED}Error at line $line_number, column $((col+1)): Label cannot be used with declaration${NC}"
+                                        echo "  $line"
+                                        printf "%*s^%s\n" $col "" "${RED}here${NC}"
+                                        return 1
+                                    fi
+                                fi
+                            fi
+                            ;;
                     esac
                     
                     # Update column position
@@ -1213,6 +1374,11 @@ check_declaration_syntax() {
         
         if $in_import && [[ "$line" == *";"* ]]; then
             in_import=false
+        fi
+        
+        # Reset arrow function flag
+        if $in_arrow_function && [[ "$line" == *";"* ]] || [[ "$line" == *"}"* ]]; then
+            in_arrow_function=false
         fi
         
     done

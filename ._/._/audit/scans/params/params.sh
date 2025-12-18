@@ -3,7 +3,7 @@
 # JavaScript Parameter Syntax Auditor - Pure Bash Implementation
 # Usage: ./params.sh <filename.js> [--test]
 
-AUDIT_SCRIPT_VERSION="1.0.0"
+AUDIT_SCRIPT_VERSION="1.1.0"
 TEST_DIR="params_tests"
 
 # Color codes for output
@@ -42,7 +42,7 @@ is_whitespace() {
     esac
 }
 
-# Function to check if character is valid for identifier (not first char)
+# Function to check if character is valid for identifier
 is_valid_id_char() {
     local char="$1"
     case "$char" in
@@ -58,6 +58,22 @@ is_valid_id_start() {
         [a-zA-Z_$]) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+# Function to check if token is a valid parameter name
+is_valid_param_name() {
+    local token="$1"
+    
+    # Cannot be empty
+    [ -z "$token" ] && return 1
+    
+    # Must start with letter, underscore, or dollar sign
+    [[ ! "$token" =~ ^[a-zA-Z_$] ]] && return 1
+    
+    # Can only contain letters, numbers, underscore, and dollar sign
+    [[ "$token" =~ [^a-zA-Z0-9_$] ]] && return 1
+    
+    return 0
 }
 
 # Function to check if token is a reserved word
@@ -140,6 +156,14 @@ get_token() {
                     while [ $pos -lt $length ] && ([[ "${line:$pos:1}" =~ [0-9] ]] || [ "${line:$pos:1}" = "." ] || [ "${line:$pos:1}" = "e" ] || [ "${line:$pos:1}" = "E" ]); do
                         ((pos++))
                     done
+                elif [ "$char" = "-" ]; then
+                    # Handle hyphen as potential identifier character (invalid)
+                    token="$char"
+                    ((pos++))
+                else
+                    # Unknown character
+                    token="$char"
+                    ((pos++))
                 fi
                 ;;
         esac
@@ -148,6 +172,122 @@ get_token() {
     fi
     
     echo "$token"
+}
+
+# Function to check for missing commas between parameters
+check_missing_comma() {
+    local line="$1"
+    local pos="$2"
+    local length=${#line}
+    
+    # Skip current token
+    local current_token=$(get_token "$line" $pos)
+    local current_length=${#current_token}
+    ((pos += current_length))
+    
+    # Skip whitespace
+    while [ $pos -lt $length ] && is_whitespace "${line:$pos:1}"; do
+        ((pos++))
+    done
+    
+    if [ $pos -lt $length ]; then
+        local next_char="${line:$pos:1}"
+        if is_valid_id_start "$next_char" || [ "$next_char" = "{" ] || [ "$next_char" = "[" ] || [ "$next_char" = "." ] || [[ "$next_char" =~ [0-9] ]]; then
+            # Found identifier/pattern without comma
+            return 0
+        fi
+    fi
+    
+    return 1
+}
+
+# Function to check for destructuring pattern errors
+check_destructure_pattern() {
+    local line="$1"
+    local start_pos="$2"
+    local length=${#line}
+    local pos=$start_pos
+    local brace_count=0
+    local bracket_count=0
+    local in_pattern=false
+    
+    while [ $pos -lt $length ]; do
+        local char="${line:$pos:1}"
+        
+        if [ "$char" = "{" ]; then
+            ((brace_count++))
+            in_pattern=true
+        elif [ "$char" = "}" ]; then
+            ((brace_count--))
+        elif [ "$char" = "[" ]; then
+            ((bracket_count++))
+            in_pattern=true
+        elif [ "$char" = "]" ]; then
+            ((bracket_count--))
+        elif [ "$char" = ")" ]; then
+            if [ $brace_count -eq 0 ] && [ $bracket_count -eq 0 ]; then
+                # End of parameter list
+                break
+            fi
+        elif [ "$char" = "," ] && [ $brace_count -eq 0 ] && [ $bracket_count -eq 0 ]; then
+            # End of parameter
+            break
+        elif $in_pattern && [ "$char" = "=" ] && [ $brace_count -eq 0 ] && [ $bracket_count -eq 0 ]; then
+            # Default value assignment
+            break
+        fi
+        
+        # Check for missing comma in object destructuring
+        if [ $brace_count -eq 1 ] && [ "$char" = " " ]; then
+            local next_pos=$((pos+1))
+            while [ $next_pos -lt $length ] && is_whitespace "${line:$next_pos:1}"; do
+                ((next_pos++))
+            done
+            if [ $next_pos -lt $length ]; then
+                local next_char="${line:$next_pos:1}"
+                if is_valid_id_start "$next_char" || [ "$next_char" = "[" ] || [ "$next_char" = "." ]; then
+                    # Missing comma between properties
+                    echo "Missing comma in object destructuring"
+                    return 1
+                fi
+            fi
+        fi
+        
+        # Check for missing colon in object destructuring
+        if [ $brace_count -eq 1 ] && [ "$char" = ":" ]; then
+            local next_pos=$((pos+1))
+            while [ $next_pos -lt $length ] && is_whitespace "${line:$next_pos:1}"; do
+                ((next_pos++))
+            done
+            if [ $next_pos -lt $length ]; then
+                local next_char="${line:$next_pos:1}"
+                if [ "$next_char" = "}" ] || [ "$next_char" = "," ]; then
+                    # Missing property name after colon
+                    echo "Missing property name after colon"
+                    return 1
+                fi
+            fi
+        fi
+        
+        # Check for empty rest in object destructuring
+        if [ $brace_count -eq 1 ] && [ "$char" = "." ]; then
+            if [ $((pos+2)) -lt $length ] && [ "${line:$pos:3}" = "..." ]; then
+                local next_pos=$((pos+3))
+                while [ $next_pos -lt $length ] && is_whitespace "${line:$next_pos:1}"; do
+                    ((next_pos++))
+                done
+                if [ $next_pos -lt $length ] && [ "${line:$next_pos:1}" = "}" ]; then
+                    # Empty rest in object destructuring
+                    echo "Empty rest in object destructuring"
+                    return 1
+                fi
+            fi
+        fi
+        
+        ((pos++))
+    done
+    
+    return 0
 }
 
 # Function to check for parameter syntax errors in JavaScript code
@@ -205,7 +345,7 @@ check_param_syntax() {
         local line_length=${#line}
         
         # Check for strict mode directive
-        if [[ "$line" =~ ^[' ''\t']*"use strict" ]]; then
+        if [[ "$line" =~ ^[' ''\t']*\"use\ +strict\" ]]; then
             in_strict_mode=true
         fi
         
@@ -309,7 +449,7 @@ check_param_syntax() {
                     fi
                     
                     # Check for async keyword
-                    if [ "$token" = "async" ] && ! $in_async_decl && ! $in_function_decl && ! $in_method_decl; then
+                    if [ "$token" = "async" ] && ! $in_async_decl && ! $in_function_decl && ! $in_method_decl && ! $in_constructor_decl; then
                         in_async_decl=true
                         current_function_type="async"
                     fi
@@ -509,6 +649,16 @@ check_param_syntax() {
                                     destructure_depth=$paren_depth
                                     destructure_start_line=$line_number
                                     destructure_start_col=$col
+                                    
+                                    # Check destructuring pattern for errors
+                                    local destructure_error=$(check_destructure_pattern "$line" $col)
+                                    if [ -n "$destructure_error" ]; then
+                                        echo -e "${RED}Error at line $line_number, column $((col+1)): $destructure_error${NC}"
+                                        echo "  $line"
+                                        printf "%*s^%s\n" $((col+1)) "" "${RED}here${NC}"
+                                        echo "$(realpath "$filename")"
+                                        return 1
+                                    fi
                                 fi
                                 ;;
                             
@@ -559,8 +709,17 @@ check_param_syntax() {
                             
                             # Handle identifiers (parameter names)
                             *)
-                                if [[ "$token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] && $expecting_param && ! $in_default_expr; then
-                                    # Check for invalid parameter names
+                                if $expecting_param && ! $in_default_expr; then
+                                    # Check for invalid parameter names with hyphen
+                                    if [[ "$token" =~ - ]]; then
+                                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Parameter name '$token' contains invalid character '-'${NC}"
+                                        echo "  $line"
+                                        printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                        echo "$(realpath "$filename")"
+                                        return 1
+                                    fi
+                                    
+                                    # Check for invalid parameter names starting with number
                                     if [[ "$token" =~ ^[0-9] ]]; then
                                         echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Parameter name cannot start with a number${NC}"
                                         echo "  $line"
@@ -569,47 +728,66 @@ check_param_syntax() {
                                         return 1
                                     fi
                                     
-                                    # Check for reserved words as parameters
-                                    if is_reserved_word "$token"; then
-                                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Reserved word '$token' cannot be used as parameter name${NC}"
+                                    # Check if it's a valid identifier
+                                    if is_valid_param_name "$token"; then
+                                        # Check for reserved words as parameters
+                                        if is_reserved_word "$token"; then
+                                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Reserved word '$token' cannot be used as parameter name${NC}"
+                                            echo "  $line"
+                                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                            echo "$(realpath "$filename")"
+                                            return 1
+                                        fi
+                                        
+                                        # Check for strict mode restrictions
+                                        if $in_strict_mode; then
+                                            for reserved in $STRICT_RESERVED_PARAMS; do
+                                                if [ "$token" = "$reserved" ]; then
+                                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Parameter name '$token' not allowed in strict mode${NC}"
+                                                    echo "  $line"
+                                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                                    echo "$(realpath "$filename")"
+                                                    return 1
+                                                fi
+                                            done
+                                        fi
+                                        
+                                        # Check for duplicate parameter names
+                                        for existing_param in "${param_names[@]}"; do
+                                            if [ "$token" = "$existing_param" ]; then
+                                                if $in_strict_mode || $in_arrow_params; then
+                                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Duplicate parameter name '$token'${NC}"
+                                                    echo "  $line"
+                                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                                    echo "$(realpath "$filename")"
+                                                    return 1
+                                                fi
+                                            fi
+                                        done
+                                        
+                                        # Add parameter to list
+                                        param_names+=("$token")
+                                        last_param_name="$token"
+                                        expecting_param=false
+                                        expecting_comma=true
+                                        ((param_count++))
+                                        
+                                        # Check for missing comma between parameters
+                                        if check_missing_comma "$line" $col; then
+                                            echo -e "${RED}Error at line $line_number, column $((col+1)): Missing comma between parameters${NC}"
+                                            echo "  $line"
+                                            printf "%*s^%s\n" $((col+1)) "" "${RED}here${NC}"
+                                            echo "$(realpath "$filename")"
+                                            return 1
+                                        fi
+                                    elif [ "$token" != "=" ] && [ "$token" != "..." ] && [ "$token" != "{" ] && [ "$token" != "[" ]; then
+                                        # Not a valid parameter name or special token
+                                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid parameter name '$token'${NC}"
                                         echo "  $line"
                                         printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
                                         echo "$(realpath "$filename")"
                                         return 1
                                     fi
-                                    
-                                    # Check for strict mode restrictions
-                                    if $in_strict_mode; then
-                                        for reserved in $STRICT_RESERVED_PARAMS; do
-                                            if [ "$token" = "$reserved" ]; then
-                                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Parameter name '$token' not allowed in strict mode${NC}"
-                                                echo "  $line"
-                                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                                echo "$(realpath "$filename")"
-                                                return 1
-                                            fi
-                                        done
-                                    fi
-                                    
-                                    # Check for duplicate parameter names
-                                    for existing_param in "${param_names[@]}"; do
-                                        if [ "$token" = "$existing_param" ]; then
-                                            if $in_strict_mode || $in_arrow_params; then
-                                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Duplicate parameter name '$token'${NC}"
-                                                echo "  $line"
-                                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                                echo "$(realpath "$filename")"
-                                                return 1
-                                            fi
-                                        fi
-                                    done
-                                    
-                                    # Add parameter to list
-                                    param_names+=("$token")
-                                    last_param_name="$token"
-                                    expecting_param=false
-                                    expecting_comma=true
-                                    ((param_count++))
                                 elif $in_default_expr && [ $paren_depth -eq $default_expr_depth ]; then
                                     # We might be ending a default expression
                                     if [ "$token" = "," ] || [ "$token" = ")" ]; then

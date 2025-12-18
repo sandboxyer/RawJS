@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# JavaScript Regular Expression Syntax Auditor - Pure Bash Implementation
+# JavaScript Regular Expression Syntax Auditor - Improved Pure Bash Implementation
 # Usage: ./regex.sh <filename.js> [--test]
 
-AUDIT_SCRIPT_VERSION="1.1.1"
+AUDIT_SCRIPT_VERSION="2.0.1"
 TEST_DIR="regex_tests"
 
 # Color codes for output
@@ -53,14 +53,13 @@ validate_flags() {
     local flags="$1"
     local -A seen_flags
     
-    # Check each flag
+    # Check for duplicate flags
     for ((i=0; i<${#flags}; i++)); do
         local flag="${flags:$i:1}"
         
         # Check if flag is valid
         case "$flag" in
             g|i|m|s|u|y)
-                # Check for duplicates
                 if [ "${seen_flags[$flag]}" = "1" ]; then
                     echo "duplicate"
                     return 1
@@ -73,6 +72,14 @@ validate_flags() {
                 ;;
         esac
     done
+    
+    # Check for invalid combinations
+    if [[ "$flags" == *s* ]] && [[ "$flags" == *u* ]]; then
+        # Check if dotall flag 's' is used with unicode flag 'u'
+        # In JavaScript, 's' and 'u' can be used together
+        # No action needed for this combination
+        :
+    fi
     
     echo "valid"
     return 0
@@ -103,8 +110,8 @@ could_be_regex_literal() {
     
     # Check what precedes the potential regex
     case "$prev_char" in
-        # These can be followed by regex literal
-        '('|'['|'{'|','|';'|':'|'?'|'!'|'&'|'|'|'^'|'~'|'='|'<'|'>'|'+'|'-'|'*'|'/'|'%'|'@')
+        # Operators and punctuators that can precede regex literals
+        '('|'['|'{'|','|';'|':'|'?'|'!'|'&'|'|'|'^'|'~'|'='|'<'|'>'|'+'|'-'|'*'|'/'|'%'|'@'|'.')
             return 0
             ;;
         # These are likely part of identifier
@@ -117,11 +124,12 @@ could_be_regex_literal() {
                 ((j--))
             done
             
+            # Keywords that can be followed by regex literal
             case "$token" in
-                "return"|"case"|"throw"|"typeof"|"instanceof"|"void"|"delete"|"in"|"of"|"await"|"yield")
+                "return"|"case"|"throw"|"typeof"|"instanceof"|"void"|"delete"|"in"|"of"|"await"|"yield"|"else"|"do")
                     return 0
                     ;;
-                "if"|"while"|"for"|"with")
+                "if"|"while"|"for"|"with"|"switch")
                     return 0
                     ;;
                 *)
@@ -129,7 +137,7 @@ could_be_regex_literal() {
                     if [ $j -ge 0 ]; then
                         local before_token="${line:$j:1}"
                         case "$before_token" in
-                            '('|'['|'{'|','|';'|':'|'?'|'!'|'&'|'|'|'^'|'~'|'='|'<'|'>'|'+'|'-'|'*'|'/'|'%'|'@')
+                            '('|'['|'{'|','|';'|':'|'?'|'!'|'&'|'|'|'^'|'~'|'='|'<'|'>'|'+'|'-'|'*'|'/'|'%'|'@'|'.')
                                 return 0
                                 ;;
                         esac
@@ -137,6 +145,10 @@ could_be_regex_literal() {
                     return 1
                     ;;
             esac
+            ;;
+        # Quotation marks and backticks indicate string/template, not regex
+        '"'|"'"|'`')
+            return 1
             ;;
         # Default to not being regex
         *)
@@ -166,6 +178,7 @@ extract_regex_literals() {
                 local escape_next=false
                 local in_char_class=false
                 local regex_valid=true
+                local in_quantifier=false
                 
                 # Skip the opening slash
                 ((pos++))
@@ -194,9 +207,21 @@ extract_regex_literals() {
                             in_char_class=false
                             pattern="${pattern}$char"
                             ;;
+                        '{')
+                            if ! $in_char_class; then
+                                in_quantifier=true
+                            fi
+                            pattern="${pattern}$char"
+                            ;;
+                        '}')
+                            if ! $in_char_class; then
+                                in_quantifier=false
+                            fi
+                            pattern="${pattern}$char"
+                            ;;
                         '/')
-                            if $in_char_class; then
-                                # Slash inside character class is part of pattern
+                            if $in_char_class || $in_quantifier; then
+                                # Slash inside character class or quantifier is part of pattern
                                 pattern="${pattern}$char"
                             else
                                 # Found closing slash
@@ -218,7 +243,7 @@ extract_regex_literals() {
                                 done
                                 
                                 # Store the regex
-                                regexes+=("$pattern:$flags:$line_number:$regex_start")
+                                regexes+=("literal:$pattern:$flags:$line_number:$regex_start")
                                 regex_valid=false
                                 continue
                             fi
@@ -234,7 +259,7 @@ extract_regex_literals() {
                 # If we reached end of line without finding closing slash
                 if $regex_valid && [ $pos -ge $line_len ]; then
                     # Unterminated regex literal
-                    regexes+=("$pattern:::$line_number:$regex_start:unterminated")
+                    regexes+=("literal:$pattern:::$line_number:$regex_start:unterminated")
                 fi
             else
                 # Not a regex literal, continue
@@ -248,38 +273,515 @@ extract_regex_literals() {
     printf "%s\n" "${regexes[@]}"
 }
 
-# Function to parse RegExp constructor arguments (simplified)
-parse_constructor_args() {
-    local args="$1"
-    local pattern=""
-    local flags=""
+# Function to extract RegExp constructor calls
+extract_regexp_constructors() {
+    local line="$1"
+    local line_number="$2"
+    local regexes=()
     
-    # Very simple parsing - just extract content between quotes
-    # This is a simplified version for basic cases
-    if [[ "$args" =~ \"([^\"]*)\" ]]; then
-        pattern="${BASH_REMATCH[1]}"
-        # Try to get flags after comma
-        if [[ "$args" =~ \"[^\"]*\"[[:space:]]*,[[:space:]]*\"([^\"]*)\" ]]; then
-            flags="${BASH_REMATCH[1]}"
-        elif [[ "$args" =~ \"[^\"]*\"[[:space:]]*,[[:space:]]*\'([^\']*)\' ]]; then
-            flags="${BASH_REMATCH[1]}"
+    local line_len=${#line}
+    local pos=0
+    
+    # Look for "new RegExp" or "RegExp(" patterns
+    while [ $pos -lt $line_len ]; do
+        # Check for "RegExp"
+        if [ $((line_len - pos)) -ge 6 ] && [ "${line:$pos:6}" = "RegExp" ]; then
+            local regex_start=$pos
+            
+            # Move past "RegExp"
+            ((pos += 6))
+            
+            # Skip whitespace
+            while [ $pos -lt $line_len ] && is_whitespace "${line:$pos:1}"; do
+                ((pos++))
+            done
+            
+            # Check for opening parenthesis
+            if [ $pos -lt $line_len ] && [ "${line:$pos:1}" = '(' ]; then
+                ((pos++))
+                
+                # Skip whitespace
+                while [ $pos -lt $line_len ] && is_whitespace "${line:$pos:1}"; do
+                    ((pos++))
+                done
+                
+                # Extract pattern
+                local pattern=""
+                local flags=""
+                local in_string=false
+                local string_delim=""
+                local escape_next=false
+                
+                # Parse pattern argument
+                if [ $pos -lt $line_len ]; then
+                    local char="${line:$pos:1}"
+                    
+                    # Check for string delimiters
+                    if [ "$char" = '"' ] || [ "$char" = "'" ]; then
+                        string_delim="$char"
+                        in_string=true
+                        ((pos++))
+                        
+                        while [ $pos -lt $line_len ] && ( $in_string || ! [ "${line:$pos:1}" = ',' ] ); do
+                            char="${line:$pos:1}"
+                            
+                            if $escape_next; then
+                                pattern="${pattern}\\$char"
+                                escape_next=false
+                                ((pos++))
+                                continue
+                            fi
+                            
+                            case "$char" in
+                                '\\')
+                                    escape_next=true
+                                    pattern="${pattern}$char"
+                                    ;;
+                                "$string_delim")
+                                    if ! $escape_next; then
+                                        in_string=false
+                                        ((pos++))
+                                        break
+                                    else
+                                        pattern="${pattern}$char"
+                                        escape_next=false
+                                    fi
+                                    ;;
+                                *)
+                                    pattern="${pattern}$char"
+                                    ;;
+                            esac
+                            ((pos++))
+                        done
+                        
+                        # Skip whitespace
+                        while [ $pos -lt $line_len ] && is_whitespace "${line:$pos:1}"; do
+                            ((pos++))
+                        done
+                        
+                        # Check for flags argument
+                        if [ $pos -lt $line_len ] && [ "${line:$pos:1}" = ',' ]; then
+                            ((pos++))
+                            
+                            # Skip whitespace
+                            while [ $pos -lt $line_len ] && is_whitespace "${line:$pos:1}"; do
+                                ((pos++))
+                            done
+                            
+                            # Parse flags argument
+                            if [ $pos -lt $line_len ]; then
+                                char="${line:$pos:1}"
+                                
+                                if [ "$char" = '"' ] || [ "$char" = "'" ]; then
+                                    string_delim="$char"
+                                    in_string=true
+                                    ((pos++))
+                                    
+                                    while [ $pos -lt $line_len ] && $in_string; do
+                                        char="${line:$pos:1}"
+                                        
+                                        if $escape_next; then
+                                            flags="${flags}\\$char"
+                                            escape_next=false
+                                            ((pos++))
+                                            continue
+                                        fi
+                                        
+                                        case "$char" in
+                                            '\\')
+                                                escape_next=true
+                                                flags="${flags}$char"
+                                                ;;
+                                            "$string_delim")
+                                                if ! $escape_next; then
+                                                    in_string=false
+                                                else
+                                                    flags="${flags}$char"
+                                                    escape_next=false
+                                                fi
+                                                ;;
+                                            *)
+                                                flags="${flags}$char"
+                                                ;;
+                                        esac
+                                        ((pos++))
+                                    done
+                                fi
+                            fi
+                        fi
+                        
+                        # Store the regex constructor
+                        if [ -n "$pattern" ]; then
+                            regexes+=("constructor:$pattern:$flags:$line_number:$regex_start")
+                        fi
+                    fi
+                fi
+            fi
+        else
+            ((pos++))
         fi
-    elif [[ "$args" =~ \'([^\']*)\' ]]; then
-        pattern="${BASH_REMATCH[1]}"
-        # Try to get flags after comma
-        if [[ "$args" =~ \'[^\']*\'[[:space:]]*,[[:space:]]*\"([^\"]*)\" ]]; then
-            flags="${BASH_REMATCH[1]}"
-        elif [[ "$args" =~ \'[^\']*\'[[:space:]]*,[[:space:]]*\'([^\']*)\' ]]; then
-            flags="${BASH_REMATCH[1]}"
+    done
+    
+    printf "%s\n" "${regexes[@]}"
+}
+
+# Function to validate character class ranges
+validate_character_class_ranges() {
+    local pattern="$1"
+    local in_char_class=false
+    local escape_next=false
+    local class_start=0
+    local last_char_in_class=""
+    
+    for ((i=0; i<${#pattern}; i++)); do
+        local char="${pattern:$i:1}"
+        
+        if $escape_next; then
+            escape_next=false
+            if $in_char_class; then
+                last_char_in_class="\\$char"
+            fi
+            continue
+        fi
+        
+        case "$char" in
+            '\\')
+                escape_next=true
+                ;;
+            '[')
+                if ! $in_char_class; then
+                    in_char_class=true
+                    last_char_in_class=""
+                else
+                    return 1  # Nested character class
+                fi
+                ;;
+            ']')
+                if $in_char_class; then
+                    in_char_class=false
+                fi
+                ;;
+            '-')
+                if $in_char_class && [ -n "$last_char_in_class" ] && [ $i -lt $((${#pattern}-1)) ]; then
+                    local next_char="${pattern:$((i+1)):1}"
+                    if [ "$next_char" != ']' ]; then
+                        # Check if range is valid
+                        if [[ "$last_char_in_class" > "$next_char" ]]; then
+                            echo "invalid_range"
+                            return 1
+                        fi
+                        # Skip the next character since it's part of range
+                        ((i++))
+                        last_char_in_class=""
+                    fi
+                elif $in_char_class && [ $i -gt 0 ] && [ "${pattern:$((i-1)):1}" = '[' ]; then
+                    # Dash at start of character class
+                    last_char_in_class=""
+                elif $in_char_class && [ $i -lt $((${#pattern}-1)) ] && [ "${pattern:$((i+1)):1}" = ']' ]; then
+                    # Dash at end of character class
+                    :
+                elif $in_char_class && [ -n "$last_char_in_class" ] && [ "$last_char_in_class" = '-' ]; then
+                    # Double dash in character class
+                    echo "double_dash"
+                    return 1
+                fi
+                if $in_char_class; then
+                    last_char_in_class="-"
+                fi
+                ;;
+            *)
+                if $in_char_class; then
+                    last_char_in_class="$char"
+                fi
+                ;;
+        esac
+    done
+    
+    echo "valid"
+    return 0
+}
+
+# Function to validate quantifier ranges
+validate_quantifier_ranges() {
+    local pattern="$1"
+    local in_escape=false
+    local in_char_class=false
+    
+    for ((i=0; i<${#pattern}; i++)); do
+        local char="${pattern:$i:1}"
+        
+        if $in_escape; then
+            in_escape=false
+            continue
+        fi
+        
+        case "$char" in
+            '\\')
+                in_escape=true
+                ;;
+            '[')
+                in_char_class=true
+                ;;
+            ']')
+                in_char_class=false
+                ;;
+            '{')
+                if ! $in_char_class; then
+                    local j=$((i+1))
+                    local start_num=""
+                    local end_num=""
+                    
+                    # Parse the quantifier
+                    while [ $j -lt ${#pattern} ] && [ "${pattern:$j:1}" != '}' ]; do
+                        local quant_char="${pattern:$j:1}"
+                        
+                        if [[ "$quant_char" =~ [0-9] ]]; then
+                            if [ -z "$start_num" ]; then
+                                start_num="${start_num}$quant_char"
+                            else
+                                end_num="${end_num}$quant_char"
+                            fi
+                        elif [ "$quant_char" = ',' ]; then
+                            if [ -n "$end_num" ]; then
+                                # Already has comma, second comma is invalid
+                                return 1
+                            fi
+                        else
+                            # Invalid character in quantifier
+                            return 1
+                        fi
+                        ((j++))
+                    done
+                    
+                    if [ $j -ge ${#pattern} ]; then
+                        return 1  # Unterminated quantifier
+                    fi
+                    
+                    # Check if quantifier is valid
+                    if [ -n "$start_num" ] && [ -n "$end_num" ]; then
+                        if [ "$start_num" -gt "$end_num" ]; then
+                            echo "invalid_range"
+                            return 1
+                        fi
+                    fi
+                fi
+                ;;
+        esac
+    done
+    
+    echo "valid"
+    return 0
+}
+
+# Function to validate Unicode escapes
+validate_unicode_escapes() {
+    local pattern="$1"
+    local flags="$2"
+    
+    # Check for \u{...} escapes without 'u' flag
+    if [[ "$pattern" = *\\u\{* ]] && [[ ! "$flags" =~ u ]]; then
+        echo "missing_unicode_flag"
+        return 1
+    fi
+    
+    # Check for invalid Unicode code points
+    if [[ "$pattern" =~ \\u\{([^}]*)\} ]]; then
+        local code_point="${BASH_REMATCH[1]}"
+        if ! [[ "$code_point" =~ ^[0-9A-Fa-f]+$ ]]; then
+            echo "invalid_unicode_hex"
+            return 1
+        fi
+        
+        # Check if code point is too large (max 10FFFF in hex = 1114111 in decimal)
+        local decimal=$((16#$code_point 2>/dev/null || echo 0))
+        if [ $decimal -gt 1114111 ]; then
+            echo "invalid_unicode_range"
+            return 1
         fi
     fi
     
-    echo "$pattern:$flags"
+    # Check for empty Unicode escape \u{}
+    if [[ "$pattern" = *\\u\{\}* ]]; then
+        echo "empty_unicode_escape"
+        return 1
+    fi
+    
+    echo "valid"
+    return 0
 }
 
-# Function to validate regex pattern syntax
+# Function to validate property escapes \p{...}
+validate_property_escapes() {
+    local pattern="$1"
+    local flags="$2"
+    
+    # Check for \p{...} escapes without 'u' flag
+    if [[ "$pattern" = *\\p\{* ]] && [[ ! "$flags" =~ u ]]; then
+        echo "missing_property_escape_flag"
+        return 1
+    fi
+    
+    echo "valid"
+    return 0
+}
+
+# Function to validate backreferences
+validate_backreferences() {
+    local pattern="$1"
+    local in_escape=false
+    
+    for ((i=0; i<${#pattern}; i++)); do
+        local char="${pattern:$i:1}"
+        
+        if $in_escape; then
+            in_escape=false
+            if [[ "$char" =~ [1-9] ]]; then
+                # Check for invalid backreference \10 when there are less than 10 groups
+                if [ $i -lt $((${#pattern}-1)) ] && [[ "${pattern:$((i+1)):1}" =~ [0-9] ]]; then
+                    local num="${char}${pattern:$((i+1)):1}"
+                    if [ "$num" = "10" ]; then
+                        # \10 is only valid if there are 10 capturing groups
+                        echo "potential_invalid_backreference"
+                        return 1
+                    fi
+                fi
+            elif [ "$char" = "k" ]; then
+                # Named backreference \k<name>
+                if [ $i -lt $((${#pattern}-1)) ] && [ "${pattern:$((i+1)):1}" = '<' ]; then
+                    local j=$((i+2))
+                    local name=""
+                    while [ $j -lt ${#pattern} ] && [ "${pattern:$j:1}" != '>' ]; do
+                        name="${name}${pattern:$j:1}"
+                        ((j++))
+                    done
+                    
+                    if [ $j -ge ${#pattern} ]; then
+                        echo "unclosed_named_backreference"
+                        return 1
+                    fi
+                fi
+            fi
+            continue
+        fi
+        
+        case "$char" in
+            '\\')
+                in_escape=true
+                ;;
+        esac
+    done
+    
+    echo "valid"
+    return 0
+}
+
+# Function to validate named capture groups - FIXED VERSION
+validate_named_captures() {
+    local pattern="$1"
+    
+    # Check for named capture groups (?<name>)
+    local i=0
+    local len=${#pattern}
+    
+    while [ $i -lt $len ]; do
+        # Look for (?<
+        if [ $((len - i)) -ge 4 ] && 
+           [ "${pattern:$i:1}" = '(' ] &&
+           [ "${pattern:$((i+1)):1}" = '?' ] &&
+           [ "${pattern:$((i+2)):1}" = '<' ]; then
+           
+            local j=$((i+3))
+            local name=""
+            
+            # Extract the name
+            while [ $j -lt $len ] && [ "${pattern:$j:1}" != '>' ]; do
+                name="${name}${pattern:$j:1}"
+                ((j++))
+            done
+            
+            if [ $j -ge $len ]; then
+                # No closing >
+                echo "unclosed_named_capture"
+                return 1
+            fi
+            
+            # Validate the name
+            if [ -z "$name" ]; then
+                echo "empty_named_capture"
+                return 1
+            elif [[ "$name" =~ ^[0-9] ]]; then
+                echo "numeric_named_capture"
+                return 1
+            elif [[ ! "$name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+                echo "invalid_named_capture"
+                return 1
+            fi
+            
+            # Skip past this capture group
+            i=$j
+        fi
+        
+        ((i++))
+    done
+    
+    echo "valid"
+    return 0
+}
+
+# Function to validate lookbehind assertions - FIXED VERSION
+validate_lookbehind() {
+    local pattern="$1"
+    
+    local i=0
+    local len=${#pattern}
+    
+    while [ $i -lt $len ]; do
+        # Look for (?<= or (?<!
+        if [ $((len - i)) -ge 5 ] && 
+           [ "${pattern:$i:1}" = '(' ] &&
+           [ "${pattern:$((i+1)):1}" = '?' ]; then
+           
+            # Check for lookbehind
+            if [ "${pattern:$((i+2)):1}" = '<' ]; then
+                if [ "${pattern:$((i+3)):1}" = '=' ] || 
+                   [ "${pattern:$((i+3)):1}" = '!' ]; then
+                    # Valid lookbehind start
+                    # Now check if it's properly closed
+                    local j=$((i+4))
+                    local paren_depth=1
+                    
+                    while [ $j -lt $len ] && [ $paren_depth -gt 0 ]; do
+                        if [ "${pattern:$j:1}" = '(' ]; then
+                            ((paren_depth++))
+                        elif [ "${pattern:$j:1}" = ')' ]; then
+                            ((paren_depth--))
+                        fi
+                        ((j++))
+                    done
+                    
+                    if [ $paren_depth -gt 0 ]; then
+                        echo "unclosed_lookbehind"
+                        return 1
+                    fi
+                else
+                    # (?< followed by something other than = or !
+                    echo "invalid_lookbehind"
+                    return 1
+                fi
+            fi
+        fi
+        
+        ((i++))
+    done
+    
+    echo "valid"
+    return 0
+}
+
+# Enhanced function to validate regex pattern syntax
 validate_regex_pattern() {
     local pattern="$1"
+    local flags="$2"
     
     # Quick sanity checks
     if [ -z "$pattern" ]; then
@@ -287,65 +789,38 @@ validate_regex_pattern() {
         return 1
     fi
     
-    # Check for unescaped forward slash in pattern (only for regex literals)
-    # This would be caught during parsing, but check here too
-    if [[ "$pattern" == */* ]]; then
-        # Check if slash is inside character class
-        local temp_pattern="$pattern"
-        local in_char_class=0
-        local escape_next=0
-        
-        for ((i=0; i<${#temp_pattern}; i++)); do
-            local char="${temp_pattern:$i:1}"
-            
-            if [ $escape_next -eq 1 ]; then
-                escape_next=0
-                continue
-            fi
-            
-            case "$char" in
-                '\\')
-                    escape_next=1
-                    ;;
-                '[')
-                    in_char_class=1
-                    ;;
-                ']')
-                    in_char_class=0
-                    ;;
-                '/')
-                    if [ $in_char_class -eq 0 ]; then
-                        echo "unescaped_slash"
-                        return 1
-                    fi
-                    ;;
-            esac
-        done
-    fi
-    
     # Check for common regex syntax errors
     local len=${#pattern}
     local in_char_class=0
     local in_escape=0
     local paren_count=0
+    local bracket_count=0
     local last_char=""
+    local last_was_quantifiable=false
     
     for ((i=0; i<len; i++)); do
         local char="${pattern:$i:1}"
         
         if [ $in_escape -eq 1 ]; then
             in_escape=0
-            last_char="$char"
+            last_char="\\$char"
+            last_was_quantifiable=true
             continue
         fi
         
         case "$char" in
             '\\')
                 in_escape=1
+                last_char=""
+                last_was_quantifiable=false
                 ;;
             '[')
                 if [ $in_char_class -eq 0 ]; then
                     in_char_class=1
+                    bracket_count=1
+                    last_char="$char"
+                    last_was_quantifiable=false
+                    
                     # Check for empty character class
                     if [ $i -lt $((len-1)) ] && [ "${pattern:$((i+1)):1}" = ']' ]; then
                         echo "empty_character_class"
@@ -360,6 +835,8 @@ validate_regex_pattern() {
             ']')
                 if [ $in_char_class -eq 1 ]; then
                     in_char_class=0
+                    last_char="$char"
+                    last_was_quantifiable=true
                 else
                     # Unmatched closing bracket
                     echo "unmatched_closing_bracket"
@@ -368,10 +845,14 @@ validate_regex_pattern() {
                 ;;
             '(')
                 ((paren_count++))
+                last_char="$char"
+                last_was_quantifiable=false
                 ;;
             ')')
                 if [ $paren_count -gt 0 ]; then
                     ((paren_count--))
+                    last_char="$char"
+                    last_was_quantifiable=true
                 else
                     # Unmatched closing paren
                     echo "unmatched_closing_paren"
@@ -380,28 +861,58 @@ validate_regex_pattern() {
                 ;;
             '{')
                 # Check if quantifier has something to quantify
-                if [ -z "$last_char" ] || \
-                   [ "$last_char" = '(' ] || [ "$last_char" = '[' ] || \
-                   [ "$last_char" = '|' ] || [ "$last_char" = '^' ] || \
-                   [ "$last_char" = '$' ]; then
+                if ! $last_was_quantifiable; then
                     echo "nothing_to_repeat"
                     return 1
                 fi
+                
+                # Parse the quantifier
+                local j=$((i+1))
+                local quantifier=""
+                while [ $j -lt $len ] && [ "${pattern:$j:1}" != '}' ]; do
+                    quantifier="${quantifier}${pattern:$j:1}"
+                    ((j++))
+                done
+                
+                if [ $j -ge $len ]; then
+                    echo "unclosed_quantifier"
+                    return 1
+                fi
+                
+                # Validate quantifier syntax
+                if [[ ! "$quantifier" =~ ^[0-9]+(,[0-9]+)?$ ]] && [[ ! "$quantifier" =~ ^[0-9]+,$ ]]; then
+                    echo "invalid_quantifier"
+                    return 1
+                fi
+                
+                # Check quantifier range
+                if [[ "$quantifier" =~ ^([0-9]+),([0-9]+)$ ]]; then
+                    local start="${BASH_REMATCH[1]}"
+                    local end="${BASH_REMATCH[2]}"
+                    if [ "$start" -gt "$end" ]; then
+                        echo "invalid_quantifier_range"
+                        return 1
+                    fi
+                fi
+                
+                last_char="$char"
+                last_was_quantifiable=false
                 ;;
-            '}'|'?'|'*'|'+')
-                # Check quantifiers (except '}' which is handled above)
-                if [ "$char" != '}' ] && [ $in_char_class -eq 0 ]; then
-                    if [ -z "$last_char" ] || \
-                       [ "$last_char" = '(' ] || [ "$last_char" = '[' ] || \
-                       [ "$last_char" = '|' ] || [ "$last_char" = '^' ] || \
-                       [ "$last_char" = '$' ]; then
+            '}')
+                # Should be caught in '{' handler
+                echo "unmatched_brace"
+                return 1
+                ;;
+            '?'|'*'|'+')
+                # Check quantifiers
+                if [ $in_char_class -eq 0 ]; then
+                    if ! $last_was_quantifiable; then
                         echo "nothing_to_repeat"
                         return 1
                     fi
                 fi
-                ;;
-            '.')
-                # Dot is valid anywhere
+                last_char="$char"
+                last_was_quantifiable=false
                 ;;
             '|')
                 # Check for empty alternative
@@ -410,12 +921,18 @@ validate_regex_pattern() {
                     echo "empty_alternative"
                     return 1
                 fi
+                last_char="$char"
+                last_was_quantifiable=false
+                ;;
+            '^'|'$'|'.')
+                last_char="$char"
+                last_was_quantifiable=true
+                ;;
+            *)
+                last_char="$char"
+                last_was_quantifiable=true
                 ;;
         esac
-        
-        if [ "$char" != '\\' ]; then
-            last_char="$char"
-        fi
     done
     
     # Check for unclosed constructs
@@ -431,6 +948,58 @@ validate_regex_pattern() {
     
     if [ $in_escape -eq 1 ]; then
         echo "dangling_backslash"
+        return 1
+    fi
+    
+    # Run additional validations
+    local result
+    
+    # Validate character class ranges
+    result=$(validate_character_class_ranges "$pattern")
+    if [ "$result" != "valid" ]; then
+        echo "$result"
+        return 1
+    fi
+    
+    # Validate quantifier ranges
+    result=$(validate_quantifier_ranges "$pattern")
+    if [ "$result" != "valid" ]; then
+        echo "$result"
+        return 1
+    fi
+    
+    # Validate Unicode escapes
+    result=$(validate_unicode_escapes "$pattern" "$flags")
+    if [ "$result" != "valid" ]; then
+        echo "$result"
+        return 1
+    fi
+    
+    # Validate property escapes
+    result=$(validate_property_escapes "$pattern" "$flags")
+    if [ "$result" != "valid" ]; then
+        echo "$result"
+        return 1
+    fi
+    
+    # Validate backreferences
+    result=$(validate_backreferences "$pattern")
+    if [ "$result" != "valid" ]; then
+        echo "$result"
+        return 1
+    fi
+    
+    # Validate named captures
+    result=$(validate_named_captures "$pattern")
+    if [ "$result" != "valid" ]; then
+        echo "$result"
+        return 1
+    fi
+    
+    # Validate lookbehind assertions
+    result=$(validate_lookbehind "$pattern")
+    if [ "$result" != "valid" ]; then
+        echo "$result"
         return 1
     fi
     
@@ -452,10 +1021,18 @@ check_regex_syntax() {
         local regex_literals
         regex_literals=$(extract_regex_literals "$line" "$line_number")
         
-        # Check each regex literal
+        # Extract RegExp constructors from line
+        local regex_constructors
+        regex_constructors=$(extract_regexp_constructors "$line" "$line_number")
+        
+        # Combine all regex patterns
+        local all_regexes
+        all_regexes=$(printf "%s\n%s" "$regex_literals" "$regex_constructors")
+        
+        # Check each regex
         while IFS= read -r regex_info; do
             if [ -n "$regex_info" ]; then
-                IFS=':' read -r pattern flags regex_line regex_start extra <<< "$regex_info"
+                IFS=':' read -r type pattern flags regex_line regex_start extra <<< "$regex_info"
                 
                 # Check for unterminated regex
                 if [ "$extra" = "unterminated" ]; then
@@ -500,11 +1077,12 @@ check_regex_syntax() {
                     esac
                     echo "$(realpath "$filename")"
                     ((errors_found++))
+                    continue
                 fi
                 
                 # Validate pattern syntax
                 local pattern_result
-                pattern_result=$(validate_regex_pattern "$pattern")
+                pattern_result=$(validate_regex_pattern "$pattern" "$flags")
                 
                 if [ "$pattern_result" != "valid" ]; then
                     echo -e "${RED}Regex Error at line $regex_line, column $((regex_start+1)):${NC}"
@@ -551,6 +1129,60 @@ check_regex_syntax() {
                         "unescaped_slash")
                             echo -e "  ${YELLOW}Unescaped forward slash in pattern${NC}"
                             ;;
+                        "invalid_range")
+                            echo -e "  ${YELLOW}Invalid character class range${NC}"
+                            ;;
+                        "double_dash")
+                            echo -e "  ${YELLOW}Double dash in character class${NC}"
+                            ;;
+                        "invalid_quantifier_range")
+                            echo -e "  ${YELLOW}Invalid quantifier range (start > end)${NC}"
+                            ;;
+                        "missing_unicode_flag")
+                            echo -e "  ${YELLOW}Unicode escape requires 'u' flag${NC}"
+                            ;;
+                        "invalid_unicode_hex")
+                            echo -e "  ${YELLOW}Invalid Unicode escape sequence${NC}"
+                            ;;
+                        "invalid_unicode_range")
+                            echo -e "  ${YELLOW}Unicode code point out of range${NC}"
+                            ;;
+                        "empty_unicode_escape")
+                            echo -e "  ${YELLOW}Empty Unicode escape sequence${NC}"
+                            ;;
+                        "missing_property_escape_flag")
+                            echo -e "  ${YELLOW}Property escape requires 'u' flag${NC}"
+                            ;;
+                        "potential_invalid_backreference")
+                            echo -e "  ${YELLOW}Potentially invalid backreference${NC}"
+                            ;;
+                        "unclosed_named_backreference")
+                            echo -e "  ${YELLOW}Unclosed named backreference${NC}"
+                            ;;
+                        "empty_named_capture")
+                            echo -e "  ${YELLOW}Empty named capture group${NC}"
+                            ;;
+                        "numeric_named_capture")
+                            echo -e "  ${YELLOW}Named capture group cannot start with number${NC}"
+                            ;;
+                        "invalid_named_capture")
+                            echo -e "  ${YELLOW}Invalid named capture group name${NC}"
+                            ;;
+                        "invalid_lookbehind")
+                            echo -e "  ${YELLOW}Invalid lookbehind assertion${NC}"
+                            ;;
+                        "unclosed_lookbehind")
+                            echo -e "  ${YELLOW}Unclosed lookbehind assertion${NC}"
+                            ;;
+                        "unclosed_quantifier")
+                            echo -e "  ${YELLOW}Unclosed quantifier${NC}"
+                            ;;
+                        "invalid_quantifier")
+                            echo -e "  ${YELLOW}Invalid quantifier syntax${NC}"
+                            ;;
+                        "unmatched_brace")
+                            echo -e "  ${YELLOW}Unmatched closing brace${NC}"
+                            ;;
                         *)
                             echo -e "  ${YELLOW}Pattern syntax error: $pattern_result${NC}"
                             ;;
@@ -559,7 +1191,7 @@ check_regex_syntax() {
                     ((errors_found++))
                 fi
             fi
-        done <<< "$regex_literals"
+        done <<< "$all_regexes"
         
     done < "$filename"
     

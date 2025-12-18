@@ -81,10 +81,9 @@ _start:
     ; State tracking
     xor r11, r11                ; String state: 0=none, 1=', 2=", 3=`
     xor r12, r12                ; Comment state: 0=none, 1=//, 2=/* */
-    xor r13, r13                ; Escape next char flag (bits 0-7)
-                                ; Object/Array mode (bits 8-15): 0=code, 1=object, 2=array
+    xor r13, r13                ; Escape next char flag
     xor r14, r14                ; Last non-whitespace char
-    xor r15, r15                ; Brace/bracket depth counter
+    xor r15, r15                ; Brace depth (0 = not in object/array)
     
 .minify_loop:
     test rcx, rcx
@@ -110,19 +109,15 @@ _start:
     cmp al, '/'
     je .possible_comment
     
-    ; Check for object/array literals vs code blocks
+    ; Update brace depth tracking
     cmp al, '{'
-    je .handle_open_brace
+    je .increase_brace_depth
     cmp al, '}'
-    je .handle_close_brace
+    je .decrease_brace_depth
     cmp al, '['
-    je .handle_open_bracket
+    je .increase_brace_depth
     cmp al, ']'
-    je .handle_close_bracket
-    
-    ; Handle other characters
-    call .is_expression_terminator
-    jc .reset_object_array_mode
+    je .decrease_brace_depth
     
     ; Handle whitespace
     call .is_whitespace
@@ -137,255 +132,6 @@ _start:
     mov r14, rbx                ; Save last char
     
     jmp .next_char
-
-.reset_object_array_mode:
-    ; Reset object/array mode when we see expression terminators
-    mov r13, 0                  ; Clear object/array mode
-    jmp .copy_char_after_check
-
-.handle_open_brace:
-    ; Check if this is likely an object literal or code block
-    ; Object literal if preceded by =, :, , or inside array
-    push rax
-    push rbx
-    push rcx
-    
-    ; Check if we're inside array literal
-    mov bx, r13w
-    shr bx, 8
-    cmp bl, 2
-    je .is_object_literal_context
-    
-    ; Check previous character if not at buffer start
-    cmp rsi, input_buffer
-    je .is_code_block_context
-    
-    mov bl, [rsi - 1]
-    
-    ; Check for expression context characters
-    cmp bl, '='
-    je .is_object_literal_context
-    cmp bl, ':'
-    je .is_object_literal_context
-    cmp bl, ','
-    je .is_object_literal_context
-    cmp bl, '('
-    je .is_object_literal_context
-    cmp bl, '['
-    je .is_object_literal_context
-    cmp bl, '{'
-    je .is_object_literal_context
-    cmp bl, '?'
-    je .is_object_literal_context
-    cmp bl, '!'
-    je .is_object_literal_context
-    cmp bl, '&'
-    je .is_object_literal_context
-    cmp bl, '|'
-    je .is_object_literal_context
-    cmp bl, '^'
-    je .is_object_literal_context
-    cmp bl, '+'
-    je .is_object_literal_context
-    cmp bl, '-'
-    je .is_object_literal_context
-    cmp bl, '*'
-    je .is_object_literal_context
-    cmp bl, '/'
-    je .is_object_literal_context
-    cmp bl, '%'
-    je .is_object_literal_context
-    cmp bl, '<'
-    je .is_object_literal_context
-    cmp bl, '>'
-    je .is_object_literal_context
-    
-    ; Check if previous was whitespace and check character before that
-    call .is_whitespace_char
-    jnc .is_code_block_context
-    
-    ; Find previous non-whitespace character
-    mov rcx, rsi
-    sub rcx, input_buffer
-    cmp rcx, 2
-    jl .is_code_block_context
-    
-    mov bl, [rsi - 2]
-    
-    ; Check for return keyword
-    cmp byte [rsi - 5], 'r'
-    je .check_return_keyword
-    cmp byte [rsi - 6], 'r'
-    je .check_return_keyword_long
-    
-    ; Check for other keywords that would make it a code block
-    cmp bl, ')'
-    je .is_code_block_context
-    cmp bl, ']'
-    je .is_code_block_context
-    cmp bl, '}'
-    je .is_code_block_context
-    
-    ; Check identifier characters - if previous was identifier, likely code block
-    call .is_identifier_char_for_check
-    jc .is_code_block_context
-    
-.is_object_literal_context:
-    ; Set object literal mode
-    mov bx, 1
-    shl bx, 8
-    or r13w, bx
-    jmp .continue_after_brace_check
-
-.check_return_keyword:
-    cmp dword [rsi - 5], 'retu'
-    jne .is_code_block_context
-    cmp byte [rsi - 1], 'r'
-    jne .is_code_block_context
-    jmp .is_object_literal_context
-
-.check_return_keyword_long:
-    cmp dword [rsi - 6], 'retu'
-    jne .is_code_block_context
-    cmp word [rsi - 2], 'rn'
-    jne .is_code_block_context
-    jmp .is_object_literal_context
-
-.is_code_block_context:
-    ; Clear object/array mode for code block
-    mov bx, 0xFF00
-    not bx
-    and r13w, bx
-
-.continue_after_brace_check:
-    inc r15                    ; Increase depth
-    pop rcx
-    pop rbx
-    pop rax
-    
-    mov [rdi], al
-    inc rdi
-    mov r14, rax                ; Save last char
-    jmp .next_char
-
-.handle_close_brace:
-    dec r15                    ; Decrease depth
-    ; Clear object/array mode if we exit it
-    cmp r15, 0
-    jg .copy_char
-    
-    ; Reset object/array mode when we exit all braces
-    mov r13, 0
-    
-.copy_char:
-    mov [rdi], al
-    inc rdi
-    mov r14, rax                ; Save last char
-    jmp .next_char
-
-.handle_open_bracket:
-    ; Check if this is likely an array literal or property access
-    push rax
-    push rbx
-    push rcx
-    
-    ; Check if we're inside object literal
-    mov bx, r13w
-    shr bx, 8
-    cmp bl, 1
-    je .is_array_literal_context
-    
-    ; Check previous character if not at buffer start
-    cmp rsi, input_buffer
-    je .is_property_access_context
-    
-    mov bl, [rsi - 1]
-    
-    ; Check for expression context (array literal)
-    call .is_identifier_char_for_check
-    jc .is_property_access_context
-    
-    ; Check for operators that indicate expression
-    cmp bl, '='
-    je .is_array_literal_context
-    cmp bl, ':'
-    je .is_array_literal_context
-    cmp bl, ','
-    je .is_array_literal_context
-    cmp bl, '('
-    je .is_array_literal_context
-    cmp bl, '['
-    je .is_array_literal_context
-    cmp bl, '{'
-    je .is_array_literal_context
-    cmp bl, '?'
-    je .is_array_literal_context
-    cmp bl, '!'
-    je .is_array_literal_context
-    cmp bl, '&'
-    je .is_array_literal_context
-    cmp bl, '|'
-    je .is_array_literal_context
-    cmp bl, '^'
-    je .is_array_literal_context
-    cmp bl, '+'
-    je .is_array_literal_context
-    cmp bl, '-'
-    je .is_array_literal_context
-    cmp bl, '*'
-    je .is_array_literal_context
-    cmp bl, '/'
-    je .is_array_literal_context
-    cmp bl, '%'
-    je .is_array_literal_context
-    cmp bl, '<'
-    je .is_array_literal_context
-    cmp bl, '>'
-    je .is_array_literal_context
-    
-    ; Check if previous was whitespace
-    call .is_whitespace_char
-    jc .check_before_whitespace_for_bracket
-    
-.is_property_access_context:
-    ; Not an array literal - property access or computed property
-    mov bx, 0xFF00
-    not bx
-    and r13w, bx
-    jmp .continue_after_bracket_check
-
-.check_before_whitespace_for_bracket:
-    ; Find previous non-whitespace character
-    mov rcx, rsi
-    sub rcx, input_buffer
-    cmp rcx, 2
-    jl .is_property_access_context
-    
-    mov bl, [rsi - 2]
-    call .is_identifier_char_for_check
-    jc .is_property_access_context
-    jmp .is_array_literal_context
-
-.is_array_literal_context:
-    ; Set array literal mode
-    mov bx, 2
-    shl bx, 8
-    or r13w, bx
-
-.continue_after_bracket_check:
-    inc r15                    ; Increase depth
-    pop rcx
-    pop rbx
-    pop rax
-    
-    mov [rdi], al
-    inc rdi
-    mov r14, rax                ; Save last char
-    jmp .next_char
-
-.handle_close_bracket:
-    dec r15                    ; Decrease depth
-    jmp .copy_char
 
 .handle_whitespace:
     ; Check what type of whitespace
@@ -430,13 +176,9 @@ _start:
     test r14, r14
     jz .skip_char                ; No last char
     
-    ; Check if we're in object/array literal mode (skip semicolons)
-    mov bx, r13w
-    shr bx, 8
-    cmp bl, 1
-    je .skip_char                ; In object literal
-    cmp bl, 2
-    je .skip_char                ; In array literal
+    ; Don't add semicolons inside object/array literals
+    test r15, r15
+    jnz .skip_char               ; Inside object/array
     
     ; Check last character to see if we need semicolon
     mov bl, r14b
@@ -477,19 +219,27 @@ _start:
     inc rdi
     jmp .skip_char
 
+.increase_brace_depth:
+    inc r15
+    jmp .copy_char
+
+.decrease_brace_depth:
+    dec r15
+    jmp .copy_char
+
 .start_string_single:
     mov r11, 1
-    jmp .copy_char_after_check
+    jmp .copy_char
 
 .start_string_double:
     mov r11, 2
-    jmp .copy_char_after_check
+    jmp .copy_char
 
 .start_string_template:
     mov r11, 3
-    jmp .copy_char_after_check
+    jmp .copy_char
 
-.copy_char_after_check:
+.copy_char:
     mov [rdi], al
     inc rdi
     mov r14, rax                ; Save last char
@@ -500,7 +250,7 @@ _start:
     inc rdi
     mov r14, rax                ; Save last char
     
-    cmp r13b, 1
+    cmp r13, 1
     je .reset_escape
     
     cmp al, '\'
@@ -534,16 +284,16 @@ _start:
     jmp .next_char
 
 .set_escape:
-    mov r13b, 1
+    mov r13, 1
     jmp .next_char
 
 .reset_escape:
-    mov r13b, 0
+    mov r13, 0
     jmp .next_char
 
 .possible_comment:
     cmp rcx, 1
-    je .copy_char_after_check
+    je .copy_char
     
     mov bl, [rsi + 1]
     cmp bl, '/'
@@ -629,58 +379,7 @@ _start:
     xor rdi, rdi
     syscall
 
-; ========== NEW HELPER FUNCTIONS ==========
-
-.is_expression_terminator:
-    ; Check if character terminates an expression (resets object/array mode)
-    cmp al, ';'
-    je .is_term_yes
-    cmp al, 0x0A                ; Newline
-    je .is_term_yes
-    cmp al, 0x0D                ; Carriage return
-    je .is_term_yes
-    clc
-    ret
-.is_term_yes:
-    stc
-    ret
-
-.is_whitespace_char:
-    ; Check if bl is whitespace
-    push rax
-    mov al, bl
-    call .is_whitespace
-    pop rax
-    ret
-
-.is_identifier_char_for_check:
-    ; Check if bl is identifier char (for brace/bracket context)
-    cmp bl, '0'
-    jb .check_letters_for_check
-    cmp bl, '9'
-    jbe .is_id_yes_for_check
-.check_letters_for_check:
-    cmp bl, 'A'
-    jb .check_lower_for_check
-    cmp bl, 'Z'
-    jbe .is_id_yes_for_check
-.check_lower_for_check:
-    cmp bl, 'a'
-    jb .check_special_for_check
-    cmp bl, 'z'
-    jbe .is_id_yes_for_check
-.check_special_for_check:
-    cmp bl, '_'
-    je .is_id_yes_for_check
-    cmp bl, '$'
-    je .is_id_yes_for_check
-    clc
-    ret
-.is_id_yes_for_check:
-    stc
-    ret
-
-; ========== EXISTING HELPER FUNCTIONS ==========
+; ========== HELPER FUNCTIONS ==========
 
 .is_whitespace:
     cmp al, ' '

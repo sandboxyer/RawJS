@@ -83,7 +83,7 @@ _start:
     xor r12, r12                ; Comment state: 0=none, 1=//, 2=/* */
     xor r13, r13                ; Escape next char flag
     xor r14, r14                ; Last non-whitespace char
-    xor r15, r15                ; Brace depth (0 = not in object/array)
+    xor r15, r15                ; In object/array literal flag (0=no, 1=yes)
     
 .minify_loop:
     test rcx, rcx
@@ -109,15 +109,16 @@ _start:
     cmp al, '/'
     je .possible_comment
     
-    ; Update brace depth tracking
+    ; Update object/array literal tracking
+    ; We only care if we're at the top level of an object/array literal
     cmp al, '{'
-    je .increase_brace_depth
+    je .possible_object_start
     cmp al, '}'
-    je .decrease_brace_depth
+    je .possible_object_end
     cmp al, '['
-    je .increase_brace_depth
+    je .possible_array_start
     cmp al, ']'
-    je .decrease_brace_depth
+    je .possible_array_end
     
     ; Handle whitespace
     call .is_whitespace
@@ -177,8 +178,8 @@ _start:
     jz .skip_char                ; No last char
     
     ; Don't add semicolons inside object/array literals
-    test r15, r15
-    jnz .skip_char               ; Inside object/array
+    cmp r15, 0
+    jne .skip_char               ; Inside object/array
     
     ; Check last character to see if we need semicolon
     mov bl, r14b
@@ -214,17 +215,132 @@ _start:
     cmp dl, '{'
     je .skip_char
     
+    ; Check if next non-whitespace char starts a control statement
+    ; that requires a preceding semicolon
+    push rsi
+    push rcx
+    push rax
+    
+    ; Skip current newline
+    mov rbx, rsi
+    inc rbx
+    dec rcx
+    
+.peek_next_non_ws:
+    cmp rcx, 0
+    je .no_control_statement
+    mov al, [rbx]
+    
+    ; Skip whitespace
+    cmp al, ' '
+    je .continue_peek
+    cmp al, 0x09
+    je .continue_peek
+    cmp al, 0x0A
+    je .continue_peek
+    cmp al, 0x0D
+    je .continue_peek
+    
+    ; Check if next token starts a control statement
+    ; We need to check for: if, for, while, do, else, switch, try, catch, finally
+    ; But only if we're not in an object/array literal
+    
+    ; First, check if it's a letter
+    cmp al, 'a'
+    jb .no_control_statement
+    cmp al, 'z'
+    ja .no_control_statement
+    
+    ; We'll check the specific cases when we encounter them
+    ; For now, we know it's a letter, so we should add semicolon
+    ; when last char was } ) ] " ' ` or identifier
+    jmp .should_add_semicolon
+    
+.continue_peek:
+    inc rbx
+    dec rcx
+    jmp .peek_next_non_ws
+
+.should_add_semicolon:
+    pop rax
+    pop rcx
+    pop rsi
+    
     ; Insert semicolon
     mov byte [rdi], ';'
     inc rdi
     jmp .skip_char
 
-.increase_brace_depth:
-    inc r15
+.no_control_statement:
+    pop rax
+    pop rcx
+    pop rsi
+    jmp .skip_char
+
+.possible_object_start:
+    ; Check if this is an object literal or a block
+    ; Look at previous character to determine context
+    cmp rsi, input_buffer
+    je .is_block                ; At start of file, must be block
+    
+    mov bl, [rsi - 1]
+    
+    ; If preceded by =, :, ,, (, [, {, =>, or identifier, it's an object literal
+    cmp bl, '='
+    je .is_object_literal
+    cmp bl, ':'
+    je .is_object_literal
+    cmp bl, ','
+    je .is_object_literal
+    cmp bl, '('
+    je .is_object_literal
+    cmp bl, '['
+    je .is_object_literal
+    cmp bl, '{'
+    je .is_block               ; Nested block, not object literal
+    
+    ; Check for arrow function
+    cmp rsi, input_buffer + 1
+    jb .check_id_char
+    mov bh, [rsi - 2]
+    cmp bh, '='
+    jne .check_id_char
+    cmp bl, '>'
+    je .is_object_literal
+    
+.check_id_char:
+    ; If preceded by identifier char, it could be either
+    push rbx
+    call .is_identifier_char
+    pop rbx
+    jc .is_block               ; identifier{ is usually a block (like if{)
+    
+.is_block:
+    ; Regular block - don't set object literal flag
     jmp .copy_char
 
-.decrease_brace_depth:
-    dec r15
+.is_object_literal:
+    ; Start of object literal
+    mov r15, 1
+    jmp .copy_char
+
+.possible_object_end:
+    ; End of object/block
+    cmp r15, 1
+    jne .copy_char            ; Not in object literal
+    mov r15, 0                ; Exit object literal
+    jmp .copy_char
+
+.possible_array_start:
+    ; Start of array literal
+    mov r15, 1
+    jmp .copy_char
+
+.possible_array_end:
+    ; End of array literal
+    cmp r15, 1
+    jne .copy_char            ; Not in array literal
+    mov r15, 0                ; Exit array literal
     jmp .copy_char
 
 .start_string_single:

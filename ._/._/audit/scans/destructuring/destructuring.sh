@@ -3,7 +3,7 @@
 # JavaScript Destructuring Syntax Error Auditor
 # Usage: ./destructuring.sh <filename.js> [--test]
 
-DESTRUCT_SCRIPT_VERSION="1.0.0"
+DESTRUCT_SCRIPT_VERSION="1.0.1"
 TEST_DIR="destructuring_tests"
 
 # Color codes for output
@@ -222,6 +222,8 @@ check_destructuring_syntax() {
     local has_seen_comma_in_pattern=false
     local has_seen_colon_in_pattern=false
     local has_seen_default_in_pattern=false
+    local in_computed_property=false
+    local computed_property_depth=0
     
     # Read file line by line
     while IFS= read -r line || [ -n "$line" ]; do
@@ -271,11 +273,51 @@ check_destructuring_syntax() {
                     # Update column position
                     ((col += token_length - 1))
                     
+                    # Track brace/bracket/paren counts
+                    case "$token" in
+                        '{') ((brace_count++)) ;;
+                        '}') ((brace_count--)) 
+                             if $in_computed_property && [ $computed_property_depth -gt 0 ]; then
+                                 ((computed_property_depth--))
+                                 if [ $computed_property_depth -eq 0 ]; then
+                                     in_computed_property=false
+                                 fi
+                             fi
+                             ;;
+                        '[') ((bracket_count++))
+                             # Check if this is a computed property
+                             if ($in_object_pattern || $in_assignment_context) && [ "$last_non_ws_token" = "{" ] || [ "$last_non_ws_token" = "," ] || [[ "$last_non_ws_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]]; then
+                                 in_computed_property=true
+                                 ((computed_property_depth++))
+                             fi
+                             ;;
+                        ']') ((bracket_count--))
+                             if $in_computed_property && [ $computed_property_depth -gt 0 ]; then
+                                 ((computed_property_depth--))
+                                 if [ $computed_property_depth -eq 0 ]; then
+                                     in_computed_property=false
+                                 fi
+                             fi
+                             ;;
+                        '(') ((paren_count++)) ;;
+                        ')') ((paren_count--)) ;;
+                    esac
+                    
+                    # Check for declaration without pattern (Test 1)
+                    if [ "$token" = "=" ] && $in_declaration_context && [ "$last_non_ws_token" = "const" ] || [ "$last_non_ws_token" = "let" ] || [ "$last_non_ws_token" = "var" ]; then
+                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Declaration without destructuring pattern${NC}"
+                        echo "  $line"
+                        printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                        echo "$(realpath "$filename")"
+                        return 1
+                    fi
+                    
                     # Check for destructuring context
                     if [ "$token" = "const" ] || [ "$token" = "let" ] || [ "$token" = "var" ]; then
                         in_declaration_context=true
                         declaration_type="$token"
                         expecting_identifier=true
+                        in_assignment_context=false
                     elif [ "$token" = "=" ] && ($in_declaration_context || $in_assignment_context); then
                         # Check what's on the left side of =
                         if [ "$last_non_ws_token" = "{" ] || [ "$last_non_ws_token" = "[" ]; then
@@ -285,12 +327,17 @@ check_destructuring_syntax() {
                             echo "$(realpath "$filename")"
                             return 1
                         fi
+                        # Check for assignment destructuring without declaration
+                        if ! $in_declaration_context && ! $in_function_param && ! $in_arrow_param; then
+                            in_assignment_context=true
+                        fi
                     elif ([ "$token" = "{" ] || [ "$token" = "[" ]) && ($expecting_identifier || $in_assignment_context || $in_function_param || $in_arrow_param); then
                         in_destructuring=true
                         if [ "$token" = "{" ]; then
                             in_object_pattern=true
                             ((object_pattern_depth++))
                             expecting_identifier=true
+                            expecting_colon=false
                             expecting_comma_or_close=false
                             has_seen_comma_in_pattern=false
                             has_seen_colon_in_pattern=false
@@ -299,44 +346,78 @@ check_destructuring_syntax() {
                             in_array_pattern=true
                             ((array_pattern_depth++))
                             expecting_identifier=true
+                            expecting_colon=false
                             expecting_comma_or_close=false
                             has_seen_comma_in_pattern=false
                         fi
                         has_rest_operator=false
                         rest_position=-1
-                    elif [ "$token" = "}" ] && $in_object_pattern; then
+                    elif [ "$token" = "}" ] && $in_object_pattern && ! $in_computed_property; then
                         ((object_pattern_depth--))
                         if [ $object_pattern_depth -eq 0 ]; then
                             in_object_pattern=false
+                            expecting_identifier=false
+                            expecting_colon=false
+                            expecting_comma_or_close=false
                         fi
-                        expecting_identifier=false
-                        expecting_colon=false
-                        expecting_comma_or_close=false
-                    elif [ "$token" = "]" ] && $in_array_pattern; then
+                    elif [ "$token" = "]" ] && $in_array_pattern && ! $in_computed_property; then
                         ((array_pattern_depth--))
                         if [ $array_pattern_depth -eq 0 ]; then
                             in_array_pattern=false
+                            expecting_identifier=false
+                            expecting_comma_or_close=false
                         fi
-                        expecting_identifier=false
-                        expecting_comma_or_close=false
-                    elif $in_destructuring; then
+                    elif $in_destructuring && ! $in_computed_property; then
                         # Check destructuring-specific errors
                         case "$token" in
-                            # Check for empty patterns
-                            '='|'{'|'[')
-                                if [ "$token" = "=" ] && [ "$last_non_ws_token" = "{" ] || [ "$last_non_ws_token" = "[" ]; then
-                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Empty destructuring pattern${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                    echo "$(realpath "$filename")"
-                                    return 1
+                            # Check for missing default values (Tests 23, 24)
+                            '=')
+                                if $in_array_pattern || $in_object_pattern; then
+                                    has_seen_default_in_pattern=true
+                                    # Check what's after the equals
+                                    local lookahead_col=$((col+1))
+                                    local found_value=false
+                                    while [ $lookahead_col -lt $line_length ]; do
+                                        local lookahead_char="${line:$lookahead_col:1}"
+                                        if is_whitespace "$lookahead_char"; then
+                                            ((lookahead_col++))
+                                            continue
+                                        fi
+                                        if [ "$lookahead_char" = "," ] || [ "$lookahead_char" = "}" ] || [ "$lookahead_char" = "]" ]; then
+                                            # Missing default value
+                                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Missing default value after '='${NC}"
+                                            echo "  $line"
+                                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                            echo "$(realpath "$filename")"
+                                            return 1
+                                        fi
+                                        found_value=true
+                                        break
+                                    done
+                                    if ! $found_value; then
+                                        # End of line after =
+                                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Missing default value after '='${NC}"
+                                        echo "  $line"
+                                        printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                        echo "$(realpath "$filename")"
+                                        return 1
+                                    fi
+                                    
+                                    # Check if default is after rest operator
+                                    if $has_rest_operator; then
+                                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Rest operator cannot have default value${NC}"
+                                        echo "  $line"
+                                        printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                        echo "$(realpath "$filename")"
+                                        return 1
+                                    fi
                                 fi
                                 ;;
                                 
                             # Check for double commas in object patterns
                             ',')
                                 if $in_object_pattern; then
-                                    if [ "$last_non_ws_token" = "," ] || [ "$last_non_ws_token" = "{" ] || [ "$last_non_ws_token" = ":" ]; then
+                                    if [ "$last_non_ws_token" = "," ] || [ "$last_non_ws_token" = "{" ] || [ "$last_non_ws_token" = ":" ] || [ "$last_non_ws_token" = "=" ]; then
                                         echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Unexpected comma in object pattern${NC}"
                                         echo "  $line"
                                         printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
@@ -358,15 +439,44 @@ check_destructuring_syntax() {
                                 expecting_comma_or_close=false
                                 ;;
                                 
-                            # Check for colon errors
+                            # Check for colon errors (Test 28, 29)
                             ':')
                                 if $in_object_pattern; then
                                     if $expecting_colon; then
                                         expecting_colon=false
                                         expecting_identifier=true # Expect alias after colon
                                         has_seen_colon_in_pattern=true
+                                        
+                                        # Check for missing alias (Test 28)
+                                        local lookahead_col=$((col+1))
+                                        local found_alias=false
+                                        while [ $lookahead_col -lt $line_length ]; do
+                                            local lookahead_char="${line:$lookahead_col:1}"
+                                            if is_whitespace "$lookahead_char"; then
+                                                ((lookahead_col++))
+                                                continue
+                                            fi
+                                            if [ "$lookahead_char" = "," ] || [ "$lookahead_char" = "}" ] || [ "$lookahead_char" = "{" ] || [ "$lookahead_char" = "[" ]; then
+                                                # Missing alias after colon
+                                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Missing alias after ':'${NC}"
+                                                echo "  $line"
+                                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                                echo "$(realpath "$filename")"
+                                                return 1
+                                            fi
+                                            found_alias=true
+                                            break
+                                        done
+                                        if ! $found_alias; then
+                                            # End of line after colon
+                                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Missing alias after ':'${NC}"
+                                            echo "  $line"
+                                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                            echo "$(realpath "$filename")"
+                                            return 1
+                                        fi
                                     else
-                                        if [ "$last_non_ws_token" = "," ] || [ "$last_non_ws_token" = "{" ] || [ "$last_non_ws_token" = ":" ]; then
+                                        if [ "$last_non_ws_token" = "," ] || [ "$last_non_ws_token" = "{" ] || [ "$last_non_ws_token" = ":" ] || [ "$last_non_ws_token" = "=" ]; then
                                             echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Unexpected colon${NC}"
                                             echo "  $line"
                                             printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
@@ -421,36 +531,20 @@ check_destructuring_syntax() {
                                 fi
                                 ;;
                                 
-                            # Check for default value errors
-                            '=')
-                                if $in_array_pattern || $in_object_pattern; then
-                                    has_seen_default_in_pattern=true
-                                    # Check what's before the equals
-                                    if [ "$last_non_ws_token" = "," ] || [ "$last_non_ws_token" = "{" ] || [ "$last_non_ws_token" = "[" ] || [ "$last_non_ws_token" = ":" ]; then
-                                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid default value assignment${NC}"
-                                        echo "  $line"
-                                        printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                        echo "$(realpath "$filename")"
-                                        return 1
-                                    fi
-                                    
-                                    # Check for double equals
-                                    if [ "$last_token" = "=" ]; then
-                                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Double equals in default value${NC}"
-                                        echo "  $line"
-                                        printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                        echo "$(realpath "$filename")"
-                                        return 1
-                                    fi
-                                    
-                                    # Check if default is after rest operator
-                                    if $has_rest_operator; then
-                                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Rest operator cannot have default value${NC}"
-                                        echo "  $line"
-                                        printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                        echo "$(realpath "$filename")"
-                                        return 1
-                                    fi
+                            # Check for empty patterns
+                            '}'|']')
+                                if [ "$last_non_ws_token" = "{" ] && [ "$token" = "}" ]; then
+                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Empty object pattern${NC}"
+                                    echo "  $line"
+                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                    echo "$(realpath "$filename")"
+                                    return 1
+                                elif [ "$last_non_ws_token" = "[" ] && [ "$token" = "]" ]; then
+                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Empty array pattern${NC}"
+                                    echo "  $line"
+                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                    echo "$(realpath "$filename")"
+                                    return 1
                                 fi
                                 ;;
                                 
@@ -458,11 +552,13 @@ check_destructuring_syntax() {
                             *)
                                 # Check if token is a number (invalid as property name in object pattern)
                                 if [[ "$token" =~ ^[0-9]+$ ]] && $in_object_pattern && ! $expecting_colon; then
-                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Numbers cannot be property names in object patterns${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                    echo "$(realpath "$filename")"
-                                    return 1
+                                    if ! $in_assignment_context || $in_declaration_context; then
+                                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Numbers cannot be property names in object patterns${NC}"
+                                        echo "  $line"
+                                        printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                        echo "$(realpath "$filename")"
+                                        return 1
+                                    fi
                                 fi
                                 
                                 # Check if token is a boolean/null (invalid as property name)
@@ -524,13 +620,11 @@ check_destructuring_syntax() {
                             in_function_param=true
                             ;;
                         '(')
-                            ((paren_count++))
                             if $in_function_param || [ "$last_non_ws_token" = "=>" ]; then
                                 in_function_param=true
                             fi
                             ;;
                         ')')
-                            ((paren_count--))
                             if $paren_count -eq 0; then
                                 in_function_param=false
                             fi
@@ -623,38 +717,138 @@ check_destructuring_syntax() {
                             ;;
                     esac
                     
-                    # Check for assignment destructuring without parentheses
+                    # Check for assignment destructuring without parentheses (Test 34)
                     if [ "$token" = "{" ] && ! $in_declaration_context && ! $in_function_param && ! $in_arrow_param && [ $paren_count -eq 0 ]; then
                         # Check if this is object destructuring assignment
                         local lookahead_col=$((col+1))
                         local found_equals=false
                         local found_closing_brace=false
-                        local found_something=false
+                        local brace_depth=0
                         
                         while [ $lookahead_col -lt $line_length ]; do
                             local lookahead_char="${line:$lookahead_col:1}"
-                            if is_whitespace "$lookahead_char"; then
-                                ((lookahead_col++))
-                                continue
-                            fi
-                            if [ "$lookahead_char" = "}" ]; then
-                                found_closing_brace=true
-                            elif [ "$lookahead_char" = "=" ] && $found_closing_brace; then
+                            if [ "$lookahead_char" = "{" ]; then
+                                ((brace_depth++))
+                            elif [ "$lookahead_char" = "}" ]; then
+                                if [ $brace_depth -eq 0 ]; then
+                                    found_closing_brace=true
+                                else
+                                    ((brace_depth--))
+                                fi
+                            elif [ "$lookahead_char" = "=" ] && $found_closing_brace && [ $brace_depth -eq 0 ]; then
                                 found_equals=true
                                 break
-                            elif [[ "$lookahead_char" =~ [a-zA-Z0-9_$] ]]; then
-                                found_something=true
                             fi
                             ((lookahead_col++))
                         done
                         
-                        if $found_equals && ! $found_something; then
-                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Object destructuring assignment requires parentheses${NC}"
-                            echo "  $line"
-                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                            echo "$(realpath "$filename")"
-                            return 1
+                        if $found_equals; then
+                            # This is {x, y} = obj which is invalid without parentheses
+                            # Check if there's a previous statement ending with semicolon
+                            local lookback_col=$((col-1))
+                            local found_semicolon=false
+                            local found_keyword=false
+                            while [ $lookback_col -ge 0 ]; do
+                                local lookback_char="${line:$lookback_col:1}"
+                                if is_whitespace "$lookback_char"; then
+                                    ((lookback_col--))
+                                    continue
+                                fi
+                                if [ "$lookback_char" = ";" ]; then
+                                    found_semicolon=true
+                                    break
+                                fi
+                                # Check for keywords that could make this valid
+                                if [[ "$lookback_char" =~ [a-zA-Z] ]]; then
+                                    local word=""
+                                    local temp_col=$lookback_col
+                                    while [ $temp_col -ge 0 ] && [[ "${line:$temp_col:1}" =~ [a-zA-Z] ]]; do
+                                        word="${line:$temp_col:1}$word"
+                                        ((temp_col--))
+                                    done
+                                    if [ "$word" = "return" ] || [ "$word" = "throw" ] || [ "$word" = "yield" ]; then
+                                        found_keyword=true
+                                        break
+                                    fi
+                                fi
+                                break
+                            done
+                            
+                            if ! $found_semicolon && ! $found_keyword; then
+                                # This looks like statement start
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Object destructuring assignment requires parentheses${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
+                            fi
                         fi
+                    fi
+                    
+                    # Check for assignment with numbers as targets (Test 35, 36)
+                    if [ "$token" = "=" ] && $in_assignment_context && ! $in_declaration_context && ! $in_function_param && ! $in_arrow_param; then
+                        # Look back to see what's being assigned
+                        local lookback_col=$((col-token_length-1))
+                        local found_pattern_start=false
+                        local pattern_start_col=-1
+                        
+                        while [ $lookback_col -ge 0 ]; do
+                            local lookback_char="${line:$lookback_col:1}"
+                            if is_whitespace "$lookback_char"; then
+                                ((lookback_col--))
+                                continue
+                            fi
+                            if [ "$lookback_char" = "]" ] || [ "$lookback_char" = "}" ]; then
+                                found_pattern_start=true
+                                # Find the matching opening bracket/brace
+                                pattern_start_col=$lookback_col
+                                local search_char=""
+                                local match_char=""
+                                if [ "$lookback_char" = "]" ]; then
+                                    search_char="["
+                                    match_char="]"
+                                else
+                                    search_char="{"
+                                    match_char="}"
+                                fi
+                                
+                                local depth=1
+                                while [ $pattern_start_col -ge 0 ]; do
+                                    ((pattern_start_col--))
+                                    local pattern_char="${line:$pattern_start_col:1}"
+                                    if [ "$pattern_char" = "$match_char" ]; then
+                                        ((depth++))
+                                    elif [ "$pattern_char" = "$search_char" ]; then
+                                        ((depth--))
+                                        if [ $depth -eq 0 ]; then
+                                            break
+                                        fi
+                                    fi
+                                done
+                                
+                                if [ $pattern_start_col -ge 0 ]; then
+                                    # Check if pattern starts with number
+                                    local next_char_pos=$((pattern_start_col+1))
+                                    while [ $next_char_pos -lt $lookback_col ]; do
+                                        local next_char="${line:$next_char_pos:1}"
+                                        if is_whitespace "$next_char"; then
+                                            ((next_char_pos++))
+                                            continue
+                                        fi
+                                        if [[ "$next_char" =~ [0-9] ]]; then
+                                            echo -e "${RED}Error at line $line_number, column $((pattern_start_col+1)): Invalid assignment target${NC}"
+                                            echo "  $line"
+                                            printf "%*s^%s\n" $pattern_start_col "" "${RED}here${NC}"
+                                            echo "$(realpath "$filename")"
+                                            return 1
+                                        fi
+                                        break
+                                    done
+                                fi
+                                break
+                            fi
+                            break
+                        done
                     fi
                     
                     # Update last tokens
@@ -662,16 +856,6 @@ check_destructuring_syntax() {
                     if [ "$token" != "" ]; then
                         last_non_ws_token="$token"
                     fi
-                    
-                    # Update bracket counts
-                    case "$token" in
-                        '{') ((brace_count++)) ;;
-                        '}') ((brace_count--)) ;;
-                        '[') ((bracket_count++)) ;;
-                        ']') ((bracket_count--)) ;;
-                        '(') ((paren_count++)) ;;
-                        ')') ((paren_count--)) ;;
-                    esac
                     
                 fi
             fi
@@ -682,6 +866,14 @@ check_destructuring_syntax() {
         # Reset for new line
         if $in_comment_single; then
             in_comment_single=false
+        fi
+        
+        # Check for missing pattern after colon at end of line (Test 28)
+        if $in_object_pattern && $expecting_colon && [ $col -ge $line_length ]; then
+            echo -e "${RED}Error at line $line_number: Missing pattern after colon${NC}"
+            echo "  $line"
+            echo "$(realpath "$filename")"
+            return 1
         fi
         
     done < "$filename"

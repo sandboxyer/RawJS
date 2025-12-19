@@ -3,7 +3,7 @@
 # JavaScript Template Literal Error Auditor - Pure Bash Implementation
 # Usage: ./template.sh <filename.js> [--test]
 
-AUDIT_SCRIPT_VERSION="2.1.0"
+AUDIT_SCRIPT_VERSION="2.2.0"
 TEST_DIR="template_tests"
 
 # Color codes for output
@@ -19,6 +19,15 @@ RESERVED_WORDS_IN_EXPR="break case catch class const continue debugger default d
 
 # Reserved words that cannot be used as variable names
 RESERVED_VAR_NAMES="break case catch class const continue debugger default delete do else enum export extends false finally for function if import in instanceof new null return super switch this throw true try typeof var void while with yield let static implements interface package private protected public as async await get set of"
+
+# Statement keywords that need proper context
+STATEMENT_KEYWORDS="break continue return throw debugger"
+
+# Declaration keywords
+DECLARATION_KEYWORDS="const let var class function"
+
+# Context-sensitive keywords
+CONTEXT_SENSITIVE_KEYWORDS="await yield"
 
 # Function to display usage
 show_usage() {
@@ -75,6 +84,39 @@ is_reserved_word() {
 is_reserved_var_name() {
     local token="$1"
     for word in $RESERVED_VAR_NAMES; do
+        if [ "$token" = "$word" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Function to check if token is a statement keyword
+is_statement_keyword() {
+    local token="$1"
+    for word in $STATEMENT_KEYWORDS; do
+        if [ "$token" = "$word" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Function to check if token is a declaration keyword
+is_declaration_keyword() {
+    local token="$1"
+    for word in $DECLARATION_KEYWORDS; do
+        if [ "$token" = "$word" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Function to check if token is context-sensitive
+is_context_sensitive_keyword() {
+    local token="$1"
+    for word in $CONTEXT_SENSITIVE_KEYWORDS; do
         if [ "$token" = "$word" ]; then
             return 0
         fi
@@ -175,6 +217,11 @@ validate_js_syntax() {
     local last_token="$5"
     local last_non_ws_token="$6"
     local in_template="$7"
+    local in_function="$8"
+    local in_loop="$9"
+    local in_switch="${10}"
+    local in_async="${11}"
+    local in_generator="${12}"
     
     # Check for unexpected semicolon (Test 1)
     if [ "$token" = ";" ] && ([ -z "$last_token" ] || 
@@ -263,9 +310,8 @@ validate_js_syntax() {
         return 1
     fi
     
-    # Check for lonely dot (Test 14)
-    if [ "$token" = "." ] && ([ "$last_token" = "." ] || 
-       [ -z "$last_token" ] ||
+    # Check for lonely dot (Test 14) - FIXED
+    if [ "$token" = "." ] && ([ -z "$last_token" ] ||
        [ "$last_token" = ";" ] ||
        [ "$last_token" = "{" ] ||
        [ "$last_token" = "}" ] ||
@@ -279,7 +325,15 @@ validate_js_syntax() {
        [ "$last_token" = "+" ] ||
        [ "$last_token" = "-" ] ||
        [ "$last_token" = "*" ] ||
-       [ "$last_token" = "/" ]); then
+       [ "$last_token" = "/" ] ||
+       [ "$last_token" = "&" ] ||
+       [ "$last_token" = "|" ] ||
+       [ "$last_token" = "^" ] ||
+       [ "$last_token" = "!" ] ||
+       [ "$last_token" = "?" ] ||
+       [ "$last_token" = "~" ] ||
+       [ "$last_token" = "<" ] ||
+       [ "$last_token" = ">" ]); then
         echo -e "${RED}Error at line $line_num, column $((pos+1)): Unexpected dot operator${NC}"
         return 1
     fi
@@ -325,21 +379,50 @@ validate_js_syntax() {
         fi
     fi
     
-    # Check for if without parentheses (Test 23)
-    if [ "$token" = "if" ] && [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ]; then
-        echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid context for 'if' statement${NC}"
+    # Check for if without parentheses (Test 23) - FIXED
+    if [ "$token" = "if" ] && [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && 
+       [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ] &&
+       [ "$last_non_ws_token" != "else" ] && [ "$last_non_ws_token" != "&&" ] && 
+       [ "$last_non_ws_token" != "||" ] && [ "$last_non_ws_token" != "??" ]; then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): 'if' statement in invalid context${NC}"
         return 1
     fi
     
-    # Check for break/continue/return outside function (Test 25-27)
-    if [[ "$token" =~ ^(break|continue|return)$ ]] && [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ]; then
-        echo -e "${RED}Error at line $line_num, column $((pos+1)): '$token' statement in invalid context${NC}"
+    # Check for break/continue outside loop (Test 25-26) - FIXED
+    if [ "$token" = "break" ] || [ "$token" = "continue" ]; then
+        if [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && 
+           [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ]; then
+            echo -e "${RED}Error at line $line_num, column $((pos+1)): '$token' statement in invalid context${NC}"
+            return 1
+        fi
+        # Additional check: break/continue must be followed by semicolon or label
+        local lookahead_pos=$((pos+${#token}))
+        local lookahead_token=$(get_token "$line" $lookahead_pos)
+        if [ "$lookahead_token" != ";" ] && ! [[ "$lookahead_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]]; then
+            echo -e "${RED}Error at line $line_num, column $((pos+1)): '$token' must be followed by semicolon or label${NC}"
+            return 1
+        fi
+    fi
+    
+    # Check for return outside function (Test 27) - FIXED
+    if [ "$token" = "return" ]; then
+        if ! $in_function && [ "$last_non_ws_token" != "" ] && 
+           [ "$last_non_ws_token" != ";" ] && [ "$last_non_ws_token" != "{" ] && 
+           [ "$last_non_ws_token" != "}" ]; then
+            echo -e "${RED}Error at line $line_num, column $((pos+1)): 'return' statement outside function${NC}"
+            return 1
+        fi
+    fi
+    
+    # Check for await outside async function (Test 39) - FIXED
+    if [ "$token" = "await" ] && ! $in_async; then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): 'await' outside async function${NC}"
         return 1
     fi
     
-    # Check for await/yield in invalid context (Test 39, 40)
-    if [[ "$token" =~ ^(await|yield)$ ]] && [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ] && [ "$last_non_ws_token" != "async" ]; then
-        echo -e "${RED}Error at line $line_num, column $((pos+1)): '$token' keyword in invalid context${NC}"
+    # Check for yield outside generator (Test 40) - FIXED
+    if [ "$token" = "yield" ] && ! $in_generator; then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): 'yield' outside generator function${NC}"
         return 1
     fi
     
@@ -355,24 +438,50 @@ validate_js_syntax() {
         return 1
     fi
     
-    # Check for delete error (Test 50)
-    if [ "$token" = "delete" ] && [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ] && [ "$last_non_ws_token" != "=" ]; then
+    # Check for delete error (Test 50) - FIXED
+    if [ "$token" = "delete" ] && ([ -z "$last_token" ] || 
+       [ "$last_token" = ";" ] ||
+       [ "$last_token" = "{" ] ||
+       [ "$last_token" = "}" ] ||
+       [ "$last_token" = "(" ] ||
+       [ "$last_token" = ")" ] ||
+       [ "$last_token" = "[" ] ||
+       [ "$last_token" = "]" ] ||
+       [ "$last_token" = "," ] ||
+       [ "$last_token" = ":" ] ||
+       [ "$last_token" = "=" ] ||
+       [ "$last_token" = "+" ] ||
+       [ "$last_token" = "-" ] ||
+       [ "$last_token" = "*" ] ||
+       [ "$last_token" = "/" ]); then
         echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid use of 'delete' operator${NC}"
         return 1
     fi
     
-    # Check for optional chain errors (Test 32-34)
-    if [ "$token" = "?." ] && ([ -z "$last_token" ] || [ "$last_token" = "." ]); then
+    # Check for optional chain errors (Test 32-34) - FIXED for Test 32
+    if [ "$token" = "?." ] && ([ -z "$last_token" ] || 
+       [[ ! "$last_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] &&
+       [ "$last_token" != ")" ] &&
+       [ "$last_token" != "]" ] &&
+       [ "$last_token" != "}" ]); then
         echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid optional chaining${NC}"
         return 1
     fi
     
-    if [ "$token" = "?[" ] && ([ -z "$last_token" ] || [ "$last_token" = "." ] || [ "$last_token" = "]" ]); then
+    if [ "$token" = "?[" ] && ([ -z "$last_token" ] || 
+       [[ ! "$last_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] &&
+       [ "$last_token" != ")" ] &&
+       [ "$last_token" != "]" ] &&
+       [ "$last_token" != "}" ]); then
         echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid optional chaining${NC}"
         return 1
     fi
     
-    if [ "$token" = "?(" ] && ([ -z "$last_token" ] || [ "$last_token" = "." ] || [ "$last_token" = ")" ]); then
+    if [ "$token" = "?(" ] && ([ -z "$last_token" ] || 
+       [[ ! "$last_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] &&
+       [ "$last_token" != ")" ] &&
+       [ "$last_token" != "]" ] &&
+       [ "$last_token" != "}" ]); then
         echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid optional chaining${NC}"
         return 1
     fi
@@ -450,6 +559,17 @@ validate_js_syntax() {
     # Check for duplicate default (Test 43)
     if [ "$token" = "default" ] && [ "$last_token" = "default" ]; then
         echo -e "${RED}Error at line $line_num, column $((pos+1)): Duplicate 'default' in switch${NC}"
+        return 1
+    fi
+    
+    # Check for function without parentheses (Test 47) - FIXED
+    if [ "$token" = "function" ] && [ "$last_non_ws_token" != "" ] && 
+       [ "$last_non_ws_token" != ";" ] && [ "$last_non_ws_token" != "{" ] && 
+       [ "$last_non_ws_token" != "}" ] && [ "$last_non_ws_token" != "=" ] &&
+       [ "$last_non_ws_token" != "," ] && [ "$last_non_ws_token" != ":" ] &&
+       [ "$last_non_ws_token" != "(" ] && [ "$last_non_ws_token" != ")" ] &&
+       [ "$last_non_ws_token" != "[" ] && [ "$last_non_ws_token" != "]" ]; then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid function declaration${NC}"
         return 1
     fi
     
@@ -580,6 +700,11 @@ check_template_syntax() {
     local brace_count=0
     local bracket_count=0
     local paren_count=0
+    local in_function=false
+    local in_loop=false
+    local in_switch=false
+    local in_async=false
+    local in_generator=false
     
     # Track backtick positions for better error messages
     local template_start_line=0
@@ -671,6 +796,15 @@ check_template_syntax() {
                         else
                             in_tagged_template=false
                         fi
+                        
+                        # Special check for import/export with template (Tests 70, 72)
+                        if [ "$last_non_ws_token" = "from" ] || [ "$last_non_ws_token" = "export" ]; then
+                            echo -e "${RED}Error at line $line_number, column $((col+1)): Template literal not allowed in import/export statement${NC}"
+                            echo "  $line"
+                            printf "%*s^%s\n" $col "" "${RED}here${NC}"
+                            echo "$(realpath "$filename")"
+                            return 1
+                        fi
                     else
                         # Ending a template literal
                         if ! $in_template_expression; then
@@ -745,8 +879,61 @@ check_template_syntax() {
                 token_length=${#token}
                 
                 if [ -n "$token" ] && [ "$token_length" -gt 0 ]; then
+                    # Update context based on tokens
+                    case "$token" in
+                        "function")
+                            in_function=true
+                            # Check if async
+                            if [ "$last_non_ws_token" = "async" ]; then
+                                in_async=true
+                            fi
+                            # Check if generator
+                            local lookahead_pos=$((col+${#token}))
+                            while [ $lookahead_pos -lt $line_length ]; do
+                                if [ "${line:$lookahead_pos:1}" = "*" ]; then
+                                    in_generator=true
+                                    break
+                                elif ! is_whitespace "${line:$lookahead_pos:1}"; then
+                                    break
+                                fi
+                                ((lookahead_pos++))
+                            done
+                            ;;
+                        "=>")
+                            in_function=true
+                            ;;
+                        "("|")")
+                            # Keep function context
+                            ;;
+                        "{")
+                            if [ "$last_non_ws_token" = "function" ] || [ "$last_non_ws_token" = "=>" ]; then
+                                in_function=true
+                            elif [ "$last_non_ws_token" = "for" ] || [ "$last_non_ws_token" = "while" ] || [ "$last_non_ws_token" = "do" ]; then
+                                in_loop=true
+                            elif [ "$last_non_ws_token" = "switch" ]; then
+                                in_switch=true
+                            fi
+                            ;;
+                        "}")
+                            in_function=false
+                            in_loop=false
+                            in_switch=false
+                            in_async=false
+                            in_generator=false
+                            ;;
+                        "for"|"while"|"do")
+                            in_loop=true
+                            ;;
+                        "switch")
+                            in_switch=true
+                            ;;
+                        "async")
+                            in_async=true
+                            ;;
+                    esac
+                    
                     # Validate general JavaScript syntax
-                    if ! validate_js_syntax "$line" "$line_number" "$col" "$token" "$last_token" "$last_non_ws_token" "$in_template"; then
+                    if ! validate_js_syntax "$line" "$line_number" "$col" "$token" "$last_token" "$last_non_ws_token" "$in_template" "$in_function" "$in_loop" "$in_switch" "$in_async" "$in_generator"; then
                         echo "  $line"
                         printf "%*s^%s\n" $col "" "${RED}here${NC}"
                         echo "$(realpath "$filename")"
@@ -766,6 +953,28 @@ check_template_syntax() {
                                 printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
                                 echo "$(realpath "$filename")"
                                 return 1
+                            fi
+                            # Check for template.raw access (Test 94)
+                            if [ "$last_non_ws_token" = "." ]; then
+                                # Look back to see if it's a template
+                                local temp_pos=$((col-2))
+                                local found_backtick=false
+                                while [ $temp_pos -ge 0 ]; do
+                                    if [ "${line:$temp_pos:1}" = '`' ]; then
+                                        found_backtick=true
+                                        break
+                                    elif ! is_whitespace "${line:$temp_pos:1}" && [ "${line:$temp_pos:1}" != "." ]; then
+                                        break
+                                    fi
+                                    ((temp_pos--))
+                                done
+                                if $found_backtick; then
+                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid raw property access on template literal${NC}"
+                                    echo "  $line"
+                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                    echo "$(realpath "$filename")"
+                                    return 1
+                                fi
                             fi
                             ;;
                             

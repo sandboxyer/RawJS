@@ -3,7 +3,7 @@
 # JavaScript Label Syntax Error Auditor - Pure Bash Implementation
 # Usage: ./label.sh <filename.js> [--test]
 
-AUDIT_SCRIPT_VERSION="3.0.0"
+AUDIT_SCRIPT_VERSION="3.1.0"
 TEST_DIR="label_tests"
 
 # Color codes for output
@@ -37,7 +37,7 @@ show_usage() {
 is_whitespace() {
     local char="$1"
     case "$char" in
-        ' '|$'\t'|$'\n'|$'\r') return  ;;
+        ' '|$'\t'|$'\n'|$'\r') return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -46,7 +46,7 @@ is_whitespace() {
 is_valid_label_char() {
     local char="$1"
     case "$char" in
-        [a-zA-Z0-9_$]) return  ;;
+        [a-zA-Z0-9_$]) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -55,7 +55,7 @@ is_valid_label_char() {
 is_valid_label_start() {
     local char="$1"
     case "$char" in
-        [a-zA-Z_$]) return  ;;
+        [a-zA-Z_$]) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -65,7 +65,7 @@ is_reserved_word() {
     local token="$1"
     for word in $RESERVED_WORDS; do
         if [ "$token" = "$word" ]; then
-            return 
+            return 0
         fi
     done
     return 1
@@ -76,7 +76,7 @@ is_strict_reserved_word() {
     local token="$1"
     for word in $STRICT_RESERVED_WORDS; do
         if [ "$token" = "$word" ]; then
-            return 
+            return 0
         fi
     done
     return 1
@@ -207,6 +207,28 @@ strip_comments() {
     echo "$result"
 }
 
+# Function to check if label name is valid
+is_valid_label_name() {
+    local label_name="$1"
+    
+    # Must start with letter, underscore, or dollar sign
+    if [[ ! "$label_name" =~ ^[a-zA-Z_$] ]]; then
+        return 1
+    fi
+    
+    # Can only contain letters, numbers, underscore, or dollar sign
+    if [[ "$label_name" =~ [^a-zA-Z0-9_$] ]]; then
+        return 1
+    fi
+    
+    # Cannot be a reserved word
+    if is_reserved_word "$label_name"; then
+        return 1
+    fi
+    
+    return 0
+}
+
 # Function to check for label syntax errors in JavaScript code
 check_label_syntax() {
     local filename="$1"
@@ -222,7 +244,9 @@ check_label_syntax() {
     local last_non_ws_token=""
     local last_label=""
     local expecting_label_colon=false
-    local label_declared=false
+    local expecting_label_name=false
+    local label_line=0
+    local label_col=0
     local in_function=false
     local in_loop=false
     local in_switch=false
@@ -230,9 +254,10 @@ check_label_syntax() {
     local in_try_block=false
     local in_catch_block=false
     local in_do_while=false
-    local label_stack=()  # Stack of declared labels
-    local label_scopes=() # Stack of scope depths for labels
-    local label_types=()  # Stack of label types (loop, block, etc.)
+    local label_stack=()      # Stack of declared labels
+    local label_scopes=()     # Stack of scope depths for labels
+    local label_lines=()      # Line numbers where labels are declared
+    local label_types=()      # Stack of label types (loop, block, etc.)
     local brace_depth=0
     local paren_depth=0
     local bracket_depth=0
@@ -240,10 +265,28 @@ check_label_syntax() {
     local errors_found=0
     local in_case=false
     local in_default=false
+    local prev_line_ended_with_label=false
+    local prev_line=""
     
     # Read file line by line
     while IFS= read -r raw_line || [ -n "$raw_line" ]; do
         ((line_number++))
+        
+        # Check for label continuation from previous line
+        if $prev_line_ended_with_label && ! $in_comment_single && ! $in_comment_multi; then
+            # Check if this line starts with a colon (label continuation)
+            local trimmed_line="${raw_line#"${raw_line%%[![:space:]]*}"}"
+            if [[ "$trimmed_line" =~ ^: ]]; then
+                echo -e "${RED}Error at line $line_number, column ${#trimmed_line}: Label broken across lines is invalid${NC}"
+                echo "  $prev_line"
+                echo "  $raw_line"
+                printf "%*s^\n" $((${#prev_line})) "${RED}here${NC}"
+                echo "$(realpath "$filename")"
+                errors_found=1
+            fi
+        fi
+        
+        prev_line_ended_with_label=false
         
         # Strip comments for analysis
         local line=$(strip_comments "$raw_line")
@@ -362,17 +405,22 @@ check_label_syntax() {
                     '}') 
                         ((brace_depth--))
                         # Remove labels from this scope when exiting
-                        for ((i=${#label_stack[@]}-1; i>=0; i--)); do
+                        local i=0
+                        while [ $i -lt ${#label_stack[@]} ]; do
                             if [ "${label_scopes[$i]}" -eq $current_scope_depth ]; then
                                 unset label_stack[$i]
                                 unset label_scopes[$i]
+                                unset label_lines[$i]
                                 unset label_types[$i]
+                                # Reindex arrays
+                                label_stack=("${label_stack[@]}")
+                                label_scopes=("${label_scopes[@]}")
+                                label_lines=("${label_lines[@]}")
+                                label_types=("${label_types[@]}")
+                            else
+                                ((i++))
                             fi
                         done
-                        # Reindex arrays
-                        label_stack=("${label_stack[@]}")
-                        label_scopes=("${label_scopes[@]}")
-                        label_types=("${label_types[@]}")
                         ((current_scope_depth--))
                         ;;
                     '(') ((paren_depth++)) ;;
@@ -391,65 +439,68 @@ check_label_syntax() {
                     ((col += token_length - 1))
                     
                     # Check for label declarations (identifier followed by colon)
-                    if [[ "$token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] && [ $((col+1)) -lt $line_length ] && [ "${line:$((col+1)):1}" = ":" ]; then
+                    if [ $((col+1)) -lt $line_length ] && [ "${line:$((col+1)):1}" = ":" ]; then
                         local label_name="$token"
                         local label_line=$line_number
                         local label_col=$((col - token_length + 2))
                         
-                        # Check for invalid label characters
-                        if [[ "$label_name" =~ [^a-zA-Z0-9_$] ]]; then
-                            echo -e "${RED}Error at line $label_line, column $label_col: Invalid character in label name '$label_name'${NC}"
-                            echo "  $raw_line"
-                            printf "%*s^%s\n" $((label_col-1)) "" "${RED}here${NC}"
-                            echo "$(realpath "$filename")"
-                            errors_found=1
-                        fi
-                        
-                        # Check for reserved words
-                        if is_reserved_word "$label_name"; then
-                            echo -e "${RED}Error at line $label_line, column $label_col: Reserved word '$label_name' cannot be used as label${NC}"
-                            echo "  $raw_line"
-                            printf "%*s^%s\n" $((label_col-1)) "" "${RED}here${NC}"
-                            echo "$(realpath "$filename")"
-                            errors_found=1
-                        fi
-                        
-                        if $in_strict_mode && is_strict_reserved_word "$label_name"; then
-                            echo -e "${RED}Error at line $label_line, column $label_col: Strict mode reserved word '$label_name' cannot be used as label${NC}"
-                            echo "  $raw_line"
-                            printf "%*s^%s\n" $((label_col-1)) "" "${RED}here${NC}"
-                            echo "$(realpath "$filename")"
-                            errors_found=1
-                        fi
-                        
-                        # Check for numeric labels
-                        if [[ "$label_name" =~ ^[0-9] ]]; then
-                            echo -e "${RED}Error at line $label_line, column $label_col: Label cannot start with number '$label_name'${NC}"
-                            echo "  $raw_line"
-                            printf "%*s^%s\n" $((label_col-1)) "" "${RED}here${NC}"
-                            echo "$(realpath "$filename")"
-                            errors_found=1
-                        fi
-                        
-                        # Check for duplicate label in same scope
-                        for ((i=0; i<${#label_stack[@]}; i++)); do
-                            if [ "${label_stack[$i]}" = "$label_name" ] && [ "${label_scopes[$i]}" -eq $current_scope_depth ]; then
-                                echo -e "${RED}Error at line $label_line, column $label_col: Duplicate label '$label_name' in same scope${NC}"
+                        # Check if this looks like a label name (identifier)
+                        if [[ "$label_name" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] || \
+                           [[ "$label_name" =~ ^[0-9] ]] || \
+                           [[ "$label_name" =~ [^a-zA-Z0-9_$] ]]; then
+                            
+                            # Check for invalid label characters
+                            if [[ "$label_name" =~ [^a-zA-Z0-9_$] ]]; then
+                                echo -e "${RED}Error at line $label_line, column $label_col: Invalid character in label name '$label_name'${NC}"
                                 echo "  $raw_line"
                                 printf "%*s^%s\n" $((label_col-1)) "" "${RED}here${NC}"
                                 echo "$(realpath "$filename")"
                                 errors_found=1
-                                break
                             fi
-                        done
-                        
-                        # Only add to stack if no errors found for this label
-                        if [ $errors_found -eq 0 ]; then
-                            label_stack+=("$label_name")
-                            label_scopes+=($current_scope_depth)
-                            label_types+=("unknown")
+                            
+                            # Check for numeric labels
+                            if [[ "$label_name" =~ ^[0-9] ]]; then
+                                echo -e "${RED}Error at line $label_line, column $label_col: Label cannot start with number '$label_name'${NC}"
+                                echo "  $raw_line"
+                                printf "%*s^%s\n" $((label_col-1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                errors_found=1
+                            fi
+                            
+                            # Check for reserved words
+                            if is_reserved_word "$label_name"; then
+                                echo -e "${RED}Error at line $label_line, column $label_col: Reserved word '$label_name' cannot be used as label${NC}"
+                                echo "  $raw_line"
+                                printf "%*s^%s\n" $((label_col-1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                errors_found=1
+                            fi
+                            
+                            if $in_strict_mode && is_strict_reserved_word "$label_name"; then
+                                echo -e "${RED}Error at line $label_line, column $label_col: Strict mode reserved word '$label_name' cannot be used as label${NC}"
+                                echo "  $raw_line"
+                                printf "%*s^%s\n" $((label_col-1)) "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                errors_found=1
+                            fi
+                            
+                            # Check for duplicate label in same scope
+                            for ((i=0; i<${#label_stack[@]}; i++)); do
+                                if [ "${label_stack[$i]}" = "$label_name" ] && [ "${label_scopes[$i]}" -eq $current_scope_depth ]; then
+                                    echo -e "${RED}Error at line $label_line, column $label_col: Duplicate label '$label_name' in same scope${NC}"
+                                    echo "  $raw_line"
+                                    printf "%*s^%s\n" $((label_col-1)) "" "${RED}here${NC}"
+                                    echo "$(realpath "$filename")"
+                                    errors_found=1
+                                    break
+                                fi
+                            done
+                            
+                            # Store label info for later validation
                             last_label="$label_name"
                             expecting_label_colon=true
+                            label_line=$line_number
+                            label_col=$((col - token_length + 2))
                         fi
                     fi
                     
@@ -470,8 +521,17 @@ check_label_syntax() {
                         # Get the next token after colon
                         next_token=$(get_token "$line" $lookahead_col)
                         
-                        # Check if we're at end of line (no statement after colon)
-                        if [ -z "$next_token" ] || [ "$next_token" = ";" ]; then
+                        # Special case for do-while statement
+                        if [ "$next_token" = "do" ]; then
+                            # do statement can be labeled
+                            found_valid=true
+                            # Add to label stack
+                            label_stack+=("$last_label")
+                            label_scopes+=($current_scope_depth)
+                            label_lines+=($label_line)
+                            label_types+=("loop")
+                        elif [ -z "$next_token" ] || [ "$next_token" = ";" ]; then
+                            # No statement or empty statement after label
                             echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Label '$last_label' with empty statement${NC}"
                             echo "  $raw_line"
                             printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
@@ -480,30 +540,26 @@ check_label_syntax() {
                         else
                             # Check if labeled statement is valid
                             case "$next_token" in
-                                'for'|'while'|'do')
+                                'for'|'while')
                                     # Valid loop label
                                     found_valid=true
-                                    # Update label type
-                                    for ((i=0; i<${#label_stack[@]}; i++)); do
-                                        if [ "${label_stack[$i]}" = "$last_label" ]; then
-                                            label_types[$i]="loop"
-                                            break
-                                        fi
-                                    done
+                                    # Add to label stack
+                                    label_stack+=("$last_label")
+                                    label_scopes+=($current_scope_depth)
+                                    label_lines+=($label_line)
+                                    label_types+=("loop")
                                     ;;
                                 '{')
                                     # Valid block label
                                     found_valid=true
-                                    # Update label type
-                                    for ((i=0; i<${#label_stack[@]}; i++)); do
-                                        if [ "${label_stack[$i]}" = "$last_label" ]; then
-                                            label_types[$i]="block"
-                                            break
-                                        fi
-                                    done
+                                    # Add to label stack
+                                    label_stack+=("$last_label")
+                                    label_scopes+=($current_scope_depth)
+                                    label_lines+=($label_line)
+                                    label_types+=("block")
                                     ;;
                                 'function')
-                                    # Function declarations cannot be labeled (even in non-strict mode)
+                                    # Function declarations cannot be labeled
                                     echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Cannot label function declaration${NC}"
                                     echo "  $raw_line"
                                     printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
@@ -546,6 +602,13 @@ check_label_syntax() {
                                         printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
                                         echo "$(realpath "$filename")"
                                         errors_found=1
+                                    else
+                                        # Might be a valid label on something we don't recognize
+                                        # Add to stack tentatively
+                                        label_stack+=("$last_label")
+                                        label_scopes+=($current_scope_depth)
+                                        label_lines+=($label_line)
+                                        label_types+=("unknown")
                                     fi
                                     ;;
                             esac
@@ -681,6 +744,17 @@ check_label_syntax() {
             
             ((col++))
         done
+        
+        # Check if line ends with what looks like a label name
+        if ! $in_string_single && ! $in_string_double && ! $in_template && \
+           ! $in_comment_single && ! $in_comment_multi && ! $in_regex; then
+            # Check if line ends with an identifier (possible label)
+            local trimmed_line="${line%"${line##*[![:space:]]}"}"
+            if [[ "$trimmed_line" =~ [a-zA-Z_$][a-zA-Z0-9_$]*$ ]]; then
+                prev_line_ended_with_label=true
+                prev_line="$raw_line"
+            fi
+        fi
         
         # Reset for new line
         if $in_comment_single; then

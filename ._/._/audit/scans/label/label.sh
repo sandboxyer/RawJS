@@ -3,7 +3,7 @@
 # JavaScript Label Syntax Error Auditor - Pure Bash Implementation
 # Usage: ./label.sh <filename.js> [--test]
 
-AUDIT_SCRIPT_VERSION="2.0.0"
+AUDIT_SCRIPT_VERSION="3.0.0"
 TEST_DIR="label_tests"
 
 # Color codes for output
@@ -15,7 +15,7 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Reserved JavaScript keywords (including strict mode reserved words)
-RESERVED_WORDS="break case catch class const continue debugger default delete do else enum export extends false finally for function if import in instanceof new null return super switch this throw true try typeof var void while with yield let static implements interface package private protected public as async await get set from of"
+RESERVED_WORDS="break case catch class const continue debugger default delete do else enum export extends false finally for function if import in instanceof new null return super switch this throw true try typeof var void while with yield let static implements interface package private protected public as async await get set from of eval arguments"
 
 # Strict mode reserved words
 STRICT_RESERVED_WORDS="implements interface let package private protected public static yield"
@@ -37,7 +37,7 @@ show_usage() {
 is_whitespace() {
     local char="$1"
     case "$char" in
-        ' '|$'\t'|$'\n'|$'\r') return 0 ;;
+        ' '|$'\t'|$'\n'|$'\r') return  ;;
         *) return 1 ;;
     esac
 }
@@ -46,7 +46,7 @@ is_whitespace() {
 is_valid_label_char() {
     local char="$1"
     case "$char" in
-        [a-zA-Z0-9_$]) return 0 ;;
+        [a-zA-Z0-9_$]) return  ;;
         *) return 1 ;;
     esac
 }
@@ -55,7 +55,7 @@ is_valid_label_char() {
 is_valid_label_start() {
     local char="$1"
     case "$char" in
-        [a-zA-Z_$]) return 0 ;;
+        [a-zA-Z_$]) return  ;;
         *) return 1 ;;
     esac
 }
@@ -65,7 +65,7 @@ is_reserved_word() {
     local token="$1"
     for word in $RESERVED_WORDS; do
         if [ "$token" = "$word" ]; then
-            return 0
+            return 
         fi
     done
     return 1
@@ -76,7 +76,7 @@ is_strict_reserved_word() {
     local token="$1"
     for word in $STRICT_RESERVED_WORDS; do
         if [ "$token" = "$word" ]; then
-            return 0
+            return 
         fi
     done
     return 1
@@ -164,6 +164,49 @@ get_token() {
     echo "$token"
 }
 
+# Function to strip comments from a line
+strip_comments() {
+    local line="$1"
+    local result=""
+    local in_string=""
+    local char
+    
+    for ((i=0; i<${#line}; i++)); do
+        char="${line:i:1}"
+        
+        if [ -z "$in_string" ]; then
+            if [ "$char" = "'" ] || [ "$char" = '"' ] || [ "$char" = '`' ]; then
+                in_string="$char"
+                result="${result}${char}"
+            elif [ "$char" = "/" ] && [ $((i+1)) -lt ${#line} ]; then
+                local next_char="${line:$((i+1)):1}"
+                if [ "$next_char" = "/" ]; then
+                    # Line comment found
+                    break
+                elif [ "$next_char" = "*" ]; then
+                    # Start of block comment - skip ahead
+                    ((i++))
+                    while [ $((i+1)) -lt ${#line} ] && ! [[ "${line:i:2}" = "*/" ]]; do
+                        ((i++))
+                    done
+                    ((i++))
+                else
+                    result="${result}${char}"
+                fi
+            else
+                result="${result}${char}"
+            fi
+        else
+            result="${result}${char}"
+            if [ "$char" = "$in_string" ] && [ $i -gt 0 ] && [ "${line:$((i-1)):1}" != "\\" ]; then
+                in_string=""
+            fi
+        fi
+    done
+    
+    echo "$result"
+}
+
 # Function to check for label syntax errors in JavaScript code
 check_label_syntax() {
     local filename="$1"
@@ -186,17 +229,24 @@ check_label_syntax() {
     local in_block=false
     local in_try_block=false
     local in_catch_block=false
+    local in_do_while=false
     local label_stack=()  # Stack of declared labels
     local label_scopes=() # Stack of scope depths for labels
+    local label_types=()  # Stack of label types (loop, block, etc.)
     local brace_depth=0
     local paren_depth=0
     local bracket_depth=0
     local current_scope_depth=0
     local errors_found=0
+    local in_case=false
+    local in_default=false
     
     # Read file line by line
-    while IFS= read -r line || [ -n "$line" ]; do
+    while IFS= read -r raw_line || [ -n "$raw_line" ]; do
         ((line_number++))
+        
+        # Strip comments for analysis
+        local line=$(strip_comments "$raw_line")
         local col=0
         local line_length=${#line}
         
@@ -248,9 +298,9 @@ check_label_syntax() {
                            [ "$prev_token" = "void" ] || [ "$prev_token" = "delete" ] || \
                            [ "$prev_token" = "instanceof" ] || [ "$prev_token" = "in" ] || \
                            [ "$prev_token" = "?" ] || [ "$prev_token" = "||" ] || \
-                           [ "$prev_token" = "&&" ] || [ "$prev_token" = "??" ]; then
-                            is_regex=true
-                        elif [[ "$prev_token" =~ ^(return|throw|yield|await)$ ]]; then
+                           [ "$prev_token" = "&&" ] || [ "$prev_token" = "??" ] || \
+                           [ "$prev_token" = "return" ] || [ "$prev_token" = "throw" ] || \
+                           [ "$prev_token" = "yield" ] || [ "$prev_token" = "await" ]; then
                             is_regex=true
                         fi
                         
@@ -305,8 +355,26 @@ check_label_syntax() {
                ! $in_comment_single && ! $in_comment_multi && ! $in_regex; then
                 # Update depth tracking
                 case "$char" in
-                    '{') ((brace_depth++)); ((current_scope_depth++)) ;;
-                    '}') ((brace_depth--)); ((current_scope_depth--)) ;;
+                    '{') 
+                        ((brace_depth++))
+                        ((current_scope_depth++))
+                        ;;
+                    '}') 
+                        ((brace_depth--))
+                        # Remove labels from this scope when exiting
+                        for ((i=${#label_stack[@]}-1; i>=0; i--)); do
+                            if [ "${label_scopes[$i]}" -eq $current_scope_depth ]; then
+                                unset label_stack[$i]
+                                unset label_scopes[$i]
+                                unset label_types[$i]
+                            fi
+                        done
+                        # Reindex arrays
+                        label_stack=("${label_stack[@]}")
+                        label_scopes=("${label_scopes[@]}")
+                        label_types=("${label_types[@]}")
+                        ((current_scope_depth--))
+                        ;;
                     '(') ((paren_depth++)) ;;
                     ')') ((paren_depth--)) ;;
                     '[') ((bracket_depth++)) ;;
@@ -331,7 +399,7 @@ check_label_syntax() {
                         # Check for invalid label characters
                         if [[ "$label_name" =~ [^a-zA-Z0-9_$] ]]; then
                             echo -e "${RED}Error at line $label_line, column $label_col: Invalid character in label name '$label_name'${NC}"
-                            echo "  $line"
+                            echo "  $raw_line"
                             printf "%*s^%s\n" $((label_col-1)) "" "${RED}here${NC}"
                             echo "$(realpath "$filename")"
                             errors_found=1
@@ -340,7 +408,7 @@ check_label_syntax() {
                         # Check for reserved words
                         if is_reserved_word "$label_name"; then
                             echo -e "${RED}Error at line $label_line, column $label_col: Reserved word '$label_name' cannot be used as label${NC}"
-                            echo "  $line"
+                            echo "  $raw_line"
                             printf "%*s^%s\n" $((label_col-1)) "" "${RED}here${NC}"
                             echo "$(realpath "$filename")"
                             errors_found=1
@@ -348,30 +416,30 @@ check_label_syntax() {
                         
                         if $in_strict_mode && is_strict_reserved_word "$label_name"; then
                             echo -e "${RED}Error at line $label_line, column $label_col: Strict mode reserved word '$label_name' cannot be used as label${NC}"
-                            echo "  $line"
+                            echo "  $raw_line"
                             printf "%*s^%s\n" $((label_col-1)) "" "${RED}here${NC}"
                             echo "$(realpath "$filename")"
                             errors_found=1
                         fi
                         
-                        # Check for numeric first character
+                        # Check for numeric labels
                         if [[ "$label_name" =~ ^[0-9] ]]; then
                             echo -e "${RED}Error at line $label_line, column $label_col: Label cannot start with number '$label_name'${NC}"
-                            echo "  $line"
+                            echo "  $raw_line"
                             printf "%*s^%s\n" $((label_col-1)) "" "${RED}here${NC}"
                             echo "$(realpath "$filename")"
                             errors_found=1
                         fi
                         
                         # Check for duplicate label in same scope
-                        local scope_depth=${#label_stack[@]}
                         for ((i=0; i<${#label_stack[@]}; i++)); do
                             if [ "${label_stack[$i]}" = "$label_name" ] && [ "${label_scopes[$i]}" -eq $current_scope_depth ]; then
                                 echo -e "${RED}Error at line $label_line, column $label_col: Duplicate label '$label_name' in same scope${NC}"
-                                echo "  $line"
+                                echo "  $raw_line"
                                 printf "%*s^%s\n" $((label_col-1)) "" "${RED}here${NC}"
                                 echo "$(realpath "$filename")"
                                 errors_found=1
+                                break
                             fi
                         done
                         
@@ -379,6 +447,7 @@ check_label_syntax() {
                         if [ $errors_found -eq 0 ]; then
                             label_stack+=("$label_name")
                             label_scopes+=($current_scope_depth)
+                            label_types+=("unknown")
                             last_label="$label_name"
                             expecting_label_colon=true
                         fi
@@ -387,116 +456,107 @@ check_label_syntax() {
                     # Check for colon after label
                     if [ "$token" = ":" ] && $expecting_label_colon; then
                         expecting_label_colon=false
-                        label_declared=true
                         
                         # Look ahead to see what follows the label
                         local lookahead_col=$((col+1))
                         local found_valid=false
                         local next_token=""
                         
-                        while [ $lookahead_col -lt $line_length ]; do
-                            local next_tok_char="${line:$lookahead_col:1}"
-                            if is_whitespace "$next_tok_char"; then
-                                ((lookahead_col++))
-                                continue
-                            fi
-                            
-                            # Get the next token after colon
-                            next_token=$(get_token "$line" $lookahead_col)
-                            break
+                        # Skip whitespace
+                        while [ $lookahead_col -lt $line_length ] && is_whitespace "${line:$lookahead_col:1}"; do
+                            ((lookahead_col++))
                         done
                         
+                        # Get the next token after colon
+                        next_token=$(get_token "$line" $lookahead_col)
+                        
                         # Check if we're at end of line (no statement after colon)
-                        if [ -z "$next_token" ]; then
-                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Label '$last_label' without statement${NC}"
-                            echo "  $line"
+                        if [ -z "$next_token" ] || [ "$next_token" = ";" ]; then
+                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Label '$last_label' with empty statement${NC}"
+                            echo "  $raw_line"
                             printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
                             echo "$(realpath "$filename")"
                             errors_found=1
-                            break
+                        else
+                            # Check if labeled statement is valid
+                            case "$next_token" in
+                                'for'|'while'|'do')
+                                    # Valid loop label
+                                    found_valid=true
+                                    # Update label type
+                                    for ((i=0; i<${#label_stack[@]}; i++)); do
+                                        if [ "${label_stack[$i]}" = "$last_label" ]; then
+                                            label_types[$i]="loop"
+                                            break
+                                        fi
+                                    done
+                                    ;;
+                                '{')
+                                    # Valid block label
+                                    found_valid=true
+                                    # Update label type
+                                    for ((i=0; i<${#label_stack[@]}; i++)); do
+                                        if [ "${label_stack[$i]}" = "$last_label" ]; then
+                                            label_types[$i]="block"
+                                            break
+                                        fi
+                                    done
+                                    ;;
+                                'function')
+                                    # Function declarations cannot be labeled (even in non-strict mode)
+                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Cannot label function declaration${NC}"
+                                    echo "  $raw_line"
+                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                    echo "$(realpath "$filename")"
+                                    errors_found=1
+                                    ;;
+                                'class'|'const'|'let'|'var'|'import'|'export'|'debugger'|'return'|'throw'|'break'|'continue')
+                                    # These cannot be labeled
+                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Cannot label '$next_token' statement${NC}"
+                                    echo "  $raw_line"
+                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                    echo "$(realpath "$filename")"
+                                    errors_found=1
+                                    ;;
+                                'if'|'switch'|'try'|'with'|'else'|'catch'|'finally')
+                                    # These cannot be labeled
+                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Cannot label '$next_token' statement${NC}"
+                                    echo "  $raw_line"
+                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                    echo "$(realpath "$filename")"
+                                    errors_found=1
+                                    ;;
+                                *)
+                                    # Check if it looks like an expression statement
+                                    if [[ "$next_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] || \
+                                       [[ "$next_token" =~ ^[0-9] ]] || \
+                                       [ "$next_token" = "(" ] || [ "$next_token" = "[" ] || \
+                                       [ "$next_token" = "++" ] || [ "$next_token" = "--" ] || \
+                                       [ "$next_token" = "+" ] || [ "$next_token" = "-" ] || \
+                                       [ "$next_token" = "!" ] || [ "$next_token" = "~" ] || \
+                                       [ "$next_token" = "typeof" ] || [ "$next_token" = "void" ] || \
+                                       [ "$next_token" = "delete" ] || [ "$next_token" = "new" ] || \
+                                       [ "$next_token" = "await" ] || [ "$next_token" = "yield" ] || \
+                                       [ "$next_token" = "this" ] || [ "$next_token" = "super" ] || \
+                                       [ "$next_token" = "true" ] || [ "$next_token" = "false" ] || \
+                                       [ "$next_token" = "null" ] || [ "$next_token" = "undefined" ]; then
+                                        # Expression statement - INVALID for labels
+                                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Label '$last_label' on expression statement${NC}"
+                                        echo "  $raw_line"
+                                        printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                        echo "$(realpath "$filename")"
+                                        errors_found=1
+                                    fi
+                                    ;;
+                            esac
                         fi
-                        
-                        # Check if labeled statement is valid
-                        # Only loops and blocks can be labeled in JavaScript
-                        case "$next_token" in
-                            'for'|'while'|'do'|'{')
-                                # Valid loop or block label
-                                found_valid=true
-                                ;;
-                            ';')
-                                # Empty statement after label - INVALID
-                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Label '$last_label' with empty statement${NC}"
-                                echo "  $line"
-                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                echo "$(realpath "$filename")"
-                                errors_found=1
-                                break
-                                ;;
-                            'function')
-                                # Function declarations cannot be labeled
-                                if $in_strict_mode; then
-                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Cannot label function declaration in strict mode${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                    echo "$(realpath "$filename")"
-                                    errors_found=1
-                                else
-                                    # In non-strict mode, function labels might be allowed by some engines
-                                    # but they're not standard and should be warned
-                                    echo -e "${YELLOW}Warning at line $line_number, column $((col-token_length+2)): Non-standard function label '$last_label'${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${YELLOW}here${NC}"
-                                fi
-                                break
-                                ;;
-                            'class'|'const'|'let'|'var'|'import'|'export'|'debugger'|'return'|'throw'|'break'|'continue')
-                                # These cannot be labeled
-                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Cannot label '$next_token' statement${NC}"
-                                echo "  $line"
-                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                echo "$(realpath "$filename")"
-                                errors_found=1
-                                break
-                                ;;
-                            'if'|'switch'|'try'|'with'|'else'|'catch'|'finally')
-                                # These cannot be labeled
-                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Cannot label '$next_token' statement${NC}"
-                                echo "  $line"
-                                printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                echo "$(realpath "$filename")"
-                                errors_found=1
-                                break
-                                ;;
-                            *)
-                                # Check if it looks like an expression statement
-                                if [[ "$next_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] || \
-                                   [[ "$next_token" =~ ^[0-9] ]] || \
-                                   [ "$next_token" = "(" ] || [ "$next_token" = "[" ] || \
-                                   [ "$next_token" = "++" ] || [ "$next_token" = "--" ] || \
-                                   [ "$next_token" = "+" ] || [ "$next_token" = "-" ] || \
-                                   [ "$next_token" = "!" ] || [ "$next_token" = "~" ] || \
-                                   [ "$next_token" = "typeof" ] || [ "$next_token" = "void" ] || \
-                                   [ "$next_token" = "delete" ] || [ "$next_token" = "new" ] || \
-                                   [ "$next_token" = "await" ] || [ "$next_token" = "yield" ] || \
-                                   [ "$next_token" = "this" ] || [ "$next_token" = "super" ] || \
-                                   [ "$next_token" = "true" ] || [ "$next_token" = "false" ] || \
-                                   [ "$next_token" = "null" ] || [ "$next_token" = "undefined" ]; then
-                                    # Expression statement - INVALID for labels
-                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Label '$last_label' on expression statement${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                    echo "$(realpath "$filename")"
-                                    errors_found=1
-                                    break
-                                fi
-                                ;;
-                        esac
                     fi
                     
-                    # Check for multiple labels on same statement
-                    if [ "$token" = ":" ] && [ "$last_non_ws_token" = ":" ]; then
-                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Multiple labels on same statement${NC}"
-                        echo "  $line"
+                    # Check for colon in invalid position (after for/while/do without being a label)
+                    if [ "$token" = ":" ] && ! $expecting_label_colon && \
+                       ([ "$last_non_ws_token" = "for" ] || [ "$last_non_ws_token" = "while" ] || [ "$last_non_ws_token" = "do" ]); then
+                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Colon cannot follow '$last_non_ws_token' statement${NC}"
+                        echo "  $raw_line"
                         printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
                         echo "$(realpath "$filename")"
                         errors_found=1
@@ -516,32 +576,31 @@ check_label_syntax() {
                                 # This is a labeled break/continue
                                 local label_name="$next_token"
                                 local label_found=false
+                                local label_type=""
+                                local label_index=-1
                                 
                                 # Search for the label in stack
                                 for ((i=0; i<${#label_stack[@]}; i++)); do
                                     if [ "${label_stack[$i]}" = "$label_name" ]; then
                                         label_found=true
-                                        
-                                        # Check context for continue
-                                        if [ "$token" = "continue" ] && ! $in_loop; then
-                                            # Continue can only reference loop labels
-                                            # Need to check if label refers to a loop
-                                            local label_is_loop=false
-                                            # This is a simplified check - in real parser, we'd track label types
-                                            echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'continue' can only reference loop labels${NC}"
-                                            echo "  $line"
-                                            printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                            echo "$(realpath "$filename")"
-                                            errors_found=1
-                                        fi
-                                        
+                                        label_type="${label_types[$i]}"
+                                        label_index=$i
                                         break
                                     fi
                                 done
                                 
-                                if ! $label_found; then
+                                if $label_found; then
+                                    # Check context for continue - must reference a loop label
+                                    if [ "$token" = "continue" ] && [ "$label_type" != "loop" ]; then
+                                        echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): 'continue' can only reference loop labels${NC}"
+                                        echo "  $raw_line"
+                                        printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
+                                        echo "$(realpath "$filename")"
+                                        errors_found=1
+                                    fi
+                                else
                                     echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Undefined label '$label_name'${NC}"
-                                    echo "  $line"
+                                    echo "  $raw_line"
                                     printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
                                     echo "$(realpath "$filename")"
                                     errors_found=1
@@ -567,22 +626,19 @@ check_label_syntax() {
                         '}')
                             # Exiting a block or object literal
                             in_block=false
-                            # Remove labels from this scope
-                            for ((i=${#label_stack[@]}-1; i>=0; i--)); do
-                                if [ "${label_scopes[$i]}" -eq $current_scope_depth ]; then
-                                    unset label_stack[$i]
-                                    unset label_scopes[$i]
-                                fi
-                            done
-                            # Reindex arrays
-                            label_stack=("${label_stack[@]}")
-                            label_scopes=("${label_scopes[@]}")
+                            in_case=false
+                            in_default=false
                             ;;
                         'function')
                             in_function=true
                             ;;
-                        'for'|'while'|'do')
+                        'for'|'while')
                             in_loop=true
+                            in_do_while=false
+                            ;;
+                        'do')
+                            in_loop=true
+                            in_do_while=true
                             ;;
                         'switch')
                             in_switch=true
@@ -598,14 +654,23 @@ check_label_syntax() {
                         'finally')
                             in_catch_block=false
                             ;;
+                        'case')
+                            in_case=true
+                            ;;
+                        'default')
+                            in_default=true
+                            ;;
+                        ';')
+                            # Check if we're ending a do-while loop
+                            if $in_do_while && [ "$last_non_ws_token" = ")" ]; then
+                                in_loop=false
+                                in_do_while=false
+                            fi
+                            # Reset case/default context
+                            in_case=false
+                            in_default=false
+                            ;;
                     esac
-                    
-                    # Reset loop context if we exit loops
-                    if [ "$token" = ";" ] || [ "$token" = "}" ]; then
-                        if ! $in_loop; then
-                            in_loop=false
-                        fi
-                    fi
                     
                     # Update last non-whitespace token
                     if [ "$token" != "" ]; then

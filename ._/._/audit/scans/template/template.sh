@@ -3,7 +3,7 @@
 # JavaScript Template Literal Error Auditor - Pure Bash Implementation
 # Usage: ./template.sh <filename.js> [--test]
 
-AUDIT_SCRIPT_VERSION="2.0.0"
+AUDIT_SCRIPT_VERSION="2.1.0"
 TEST_DIR="template_tests"
 
 # Color codes for output
@@ -55,7 +55,7 @@ is_valid_var_start() {
 is_valid_var_char() {
     local char="$1"
     case "$char" in
-        [a-zA-Z0-9_]) return 0 ;;
+        [a-zA-Z0-9_$]) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -134,16 +134,17 @@ get_token() {
             "'"|'"')
                 token="$char"
                 ((pos++))
-                # Skip to end of string (simplified)
-                while [ $pos -lt $length ] && [ "${line:$pos:1}" != "$char" ]; do
+                local quote_char="$char"
+                # Skip to end of string
+                while [ $pos -lt $length ]; do
                     if [ "${line:$pos:1}" = "\\" ]; then
                         ((pos++))
+                    elif [ "${line:$pos:1}" = "$quote_char" ]; then
+                        ((pos++))
+                        break
                     fi
                     ((pos++))
                 done
-                if [ $pos -lt $length ]; then
-                    ((pos++))
-                fi
                 ;;
             # Identifiers and numbers
             *)
@@ -173,6 +174,7 @@ validate_js_syntax() {
     local token="$4"
     local last_token="$5"
     local last_non_ws_token="$6"
+    local in_template="$7"
     
     # Check for unexpected semicolon (Test 1)
     if [ "$token" = ";" ] && ([ -z "$last_token" ] || 
@@ -180,7 +182,13 @@ validate_js_syntax() {
        [ "$last_token" = "{" ] || 
        [ "$last_token" = "}" ] ||
        [ "$last_token" = "(" ] ||
-       [ "$last_token" = ")" ]); then
+       [ "$last_token" = ")" ] ||
+       [ "$last_token" = "[" ] ||
+       [ "$last_token" = "]" ] ||
+       [ "$last_token" = "," ] ||
+       [ "$last_token" = ":" ] ||
+       [ "$last_token" = "?" ] ||
+       [ "$last_token" = "=>" ]); then
         echo -e "${RED}Error at line $line_num, column $((pos+1)): Unexpected semicolon${NC}"
         return 1
     fi
@@ -235,13 +243,22 @@ validate_js_syntax() {
        [ "$last_token" = "(" ] ||
        [ "$last_token" = "[" ] ||
        [ "$last_token" = "{" ] ||
-       [ "$last_token" = ":" ]); then
+       [ "$last_token" = ":" ] ||
+       [ "$last_token" = "=" ] ||
+       [ "$last_token" = "?" ] ||
+       [ "$last_token" = "+" ] ||
+       [ "$last_token" = "-" ] ||
+       [ "$last_token" = "*" ] ||
+       [ "$last_token" = "/" ] ||
+       [ "$last_token" = "&&" ] ||
+       [ "$last_token" = "||" ] ||
+       [ "$last_token" = "??" ]); then
         echo -e "${RED}Error at line $line_num, column $((pos+1)): Unexpected comma${NC}"
         return 1
     fi
     
     # Check for semicolon in array (Test 3)
-    if [ "$token" = ";" ] && [ "$last_non_ws_token" = "[" ]; then
+    if [ "$token" = ";" ] && ([ "$last_non_ws_token" = "[" ] || [ "$last_token" = "," ]); then
         echo -e "${RED}Error at line $line_num, column $((pos+1)): Semicolon in array literal${NC}"
         return 1
     fi
@@ -257,7 +274,12 @@ validate_js_syntax() {
        [ "$last_token" = "[" ] ||
        [ "$last_token" = "]" ] ||
        [ "$last_token" = "," ] ||
-       [ "$last_token" = ":" ]); then
+       [ "$last_token" = ":" ] ||
+       [ "$last_token" = "=" ] ||
+       [ "$last_token" = "+" ] ||
+       [ "$last_token" = "-" ] ||
+       [ "$last_token" = "*" ] ||
+       [ "$last_token" = "/" ]); then
         echo -e "${RED}Error at line $line_num, column $((pos+1)): Unexpected dot operator${NC}"
         return 1
     fi
@@ -285,18 +307,22 @@ validate_js_syntax() {
        [ "$last_token" = "||" ] ||
        [ "$last_token" = "&&" ] ||
        [ "$last_token" = "??" ]); then
-        # Check if next token exists
-        local next_token=$(get_token "$line" $((pos+1)))
-        if [ -z "$next_token" ] || [[ ! "$next_token" =~ ^[0-9]+$ ]]; then
-            echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid use of unary plus${NC}"
-            return 1
-        fi
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid use of unary plus${NC}"
+        return 1
     fi
     
     # Check for missing operand after operator (Test 36, 37)
     if [[ "$token" =~ ^(\*|\/|\%|\+|\-|\=\=|\!\=|\<\=|\>\=|\<|\>|\&\&|\|\||\?\?)$ ]] && [ "$last_non_ws_token" = "" ]; then
         echo -e "${RED}Error at line $line_num, column $((pos+1)): Missing left operand for '$token'${NC}"
         return 1
+    fi
+    
+    # Check for missing right operand (Test 36, 37)
+    if [ -n "$last_non_ws_token" ] && [[ "$last_non_ws_token" =~ ^(\+|\-|\*|\/|\%|\*\*|\=\=|\!\=|\<\=|\>\=|\<|\>|\&\&|\|\||\?\?|\=)$ ]]; then
+        if [ -z "$token" ] || [ "$token" = ";" ] || [ "$token" = ")" ] || [ "$token" = "]" ] || [ "$token" = "}" ] || [ "$token" = "," ]; then
+            echo -e "${RED}Error at line $line_num, column $((pos+1)): Missing right operand for '$last_non_ws_token'${NC}"
+            return 1
+        fi
     fi
     
     # Check for if without parentheses (Test 23)
@@ -312,7 +338,7 @@ validate_js_syntax() {
     fi
     
     # Check for await/yield in invalid context (Test 39, 40)
-    if [[ "$token" =~ ^(await|yield)$ ]] && [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ]; then
+    if [[ "$token" =~ ^(await|yield)$ ]] && [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ] && [ "$last_non_ws_token" != "async" ]; then
         echo -e "${RED}Error at line $line_num, column $((pos+1)): '$token' keyword in invalid context${NC}"
         return 1
     fi
@@ -332,6 +358,98 @@ validate_js_syntax() {
     # Check for delete error (Test 50)
     if [ "$token" = "delete" ] && [ "$last_non_ws_token" != "" ] && [ "$last_non_ws_token" != ";" ] && [ "$last_non_ws_token" != "{" ] && [ "$last_non_ws_token" != "}" ] && [ "$last_non_ws_token" != "=" ]; then
         echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid use of 'delete' operator${NC}"
+        return 1
+    fi
+    
+    # Check for optional chain errors (Test 32-34)
+    if [ "$token" = "?." ] && ([ -z "$last_token" ] || [ "$last_token" = "." ]); then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid optional chaining${NC}"
+        return 1
+    fi
+    
+    if [ "$token" = "?[" ] && ([ -z "$last_token" ] || [ "$last_token" = "." ] || [ "$last_token" = "]" ]); then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid optional chaining${NC}"
+        return 1
+    fi
+    
+    if [ "$token" = "?(" ] && ([ -z "$last_token" ] || [ "$last_token" = "." ] || [ "$last_token" = ")" ]); then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid optional chaining${NC}"
+        return 1
+    fi
+    
+    # Check for chained equals (Test 12)
+    if [ "$token" = "=" ] && [ "$last_non_ws_token" = "=" ]; then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): Invalid chained assignment${NC}"
+        return 1
+    fi
+    
+    # Check for missing colon in object (Test 38)
+    if [ -n "$last_non_ws_token" ] && [[ "$last_non_ws_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] && \
+       [ "$token" = ";" ] && ! $in_template; then
+        # Look back to see if we're in an object literal
+        local temp_pos=$((pos-${#last_non_ws_token}-1))
+        local found_brace=false
+        local found_comma=false
+        
+        while [ $temp_pos -ge 0 ]; do
+            local temp_char="${line:$temp_pos:1}"
+            if [ "$temp_char" = "{" ]; then
+                found_brace=true
+                break
+            elif [ "$temp_char" = "}" ] || [ "$temp_char" = ";" ] || [ "$temp_char" = ")" ] || [ "$temp_char" = "]" ]; then
+                break
+            elif [ "$temp_char" = "," ]; then
+                found_comma=true
+            fi
+            ((temp_pos--))
+        done
+        
+        if $found_brace && ! $found_comma; then
+            echo -e "${RED}Error at line $line_num, column $((pos+1)): Missing colon in object literal${NC}"
+            return 1
+        fi
+    fi
+    
+    # Check for label without statement (Test 41)
+    if [[ "$last_non_ws_token" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]] && [ "$token" = ":" ] && 
+       [ "$last_token" != "?" ] && [ "$last_token" != "case" ] && [ "$last_token" != "default" ]; then
+        # Check next token
+        local next_pos=$((pos+1))
+        local next_token=$(get_token "$line" $next_pos)
+        if [ -z "$next_token" ] || [ "$next_token" = ";" ] || [ "$next_token" = "}" ]; then
+            echo -e "${RED}Error at line $line_num, column $((pos+1)): Label without statement${NC}"
+            return 1
+        fi
+    fi
+    
+    # Check for case without colon (Test 42)
+    if [ "$token" = "case" ] && [ "$last_non_ws_token" = "{" ]; then
+        # Look ahead for colon
+        local lookahead_pos=$((pos+${#token}))
+        local found_colon=false
+        local found_break=false
+        
+        while [ $lookahead_pos -lt ${#line} ]; do
+            local lookahead_token=$(get_token "$line" $lookahead_pos)
+            if [ "$lookahead_token" = ":" ]; then
+                found_colon=true
+                break
+            elif [ "$lookahead_token" = "break" ] || [ "$lookahead_token" = "}" ]; then
+                found_break=true
+                break
+            fi
+            lookahead_pos=$((lookahead_pos+${#lookahead_token}))
+        done
+        
+        if ! $found_colon && $found_break; then
+            echo -e "${RED}Error at line $line_num, column $((pos+1)): 'case' without colon${NC}"
+            return 1
+        fi
+    fi
+    
+    # Check for duplicate default (Test 43)
+    if [ "$token" = "default" ] && [ "$last_token" = "default" ]; then
+        echo -e "${RED}Error at line $line_num, column $((pos+1)): Duplicate 'default' in switch${NC}"
         return 1
     fi
     
@@ -361,19 +479,19 @@ validate_template_expression() {
     fi
     
     # Check for statement keywords in expression
-    if [[ "$expr" =~ [[:space:]]*(break|continue|debugger|do|for|if|return|switch|throw|try|while|with)[[:space:]] ]]; then
+    if [[ "$expr" =~ ^[[:space:]]*(break|continue|debugger|do|for|if|return|switch|throw|try|while|with)[[:space:]] ]]; then
         echo -e "${RED}Error at line $line_num, column $col_num: Statement keyword '$BASH_REMATCH' in template expression${NC}"
         return 1
     fi
     
     # Check for declaration keywords
-    if [[ "$expr" =~ [[:space:]]*(const|let|var|function|class)[[:space:]] ]]; then
+    if [[ "$expr" =~ ^[[:space:]]*(const|let|var|function|class)[[:space:]] ]]; then
         echo -e "${RED}Error at line $line_num, column $col_num: Declaration keyword '$BASH_REMATCH' in template expression${NC}"
         return 1
     fi
     
     # Check for import/export in expression
-    if [[ "$expr" =~ [[:space:]]*(import|export)[[:space:]] ]]; then
+    if [[ "$expr" =~ ^[[:space:]]*(import|export)[[:space:]] ]]; then
         echo -e "${RED}Error at line $line_num, column $col_num: Module keyword '$BASH_REMATCH' in template expression${NC}"
         return 1
     fi
@@ -390,8 +508,50 @@ validate_template_expression() {
     fi
     
     # Check for spread operator without identifier
-    if [[ "$expr" =~ [[:space:]]*\.\.\.[[:space:]]*$ ]]; then
+    if [[ "$expr" =~ ^\.\.\.$ ]] || [[ "$expr" =~ [[:space:]]*\.\.\.[[:space:]]*$ ]]; then
         echo -e "${RED}Error at line $line_num, column $col_num: Spread operator without identifier${NC}"
+        return 1
+    fi
+    
+    # Check for new without constructor
+    if [[ "$expr" =~ ^new[[:space:]]*$ ]] || [[ "$expr" =~ [[:space:]]new[[:space:]]*$ ]]; then
+        echo -e "${RED}Error at line $line_num, column $col_num: 'new' without constructor${NC}"
+        return 1
+    fi
+    
+    # Check for delete without operand
+    if [[ "$expr" =~ ^delete[[:space:]]*$ ]] || [[ "$expr" =~ [[:space:]]delete[[:space:]]*$ ]]; then
+        echo -e "${RED}Error at line $line_num, column $col_num: 'delete' without operand${NC}"
+        return 1
+    fi
+    
+    # Check for void without expression
+    if [[ "$expr" =~ ^void[[:space:]]*$ ]] || [[ "$expr" =~ [[:space:]]void[[:space:]]*$ ]]; then
+        echo -e "${RED}Error at line $line_num, column $col_num: 'void' without expression${NC}"
+        return 1
+    fi
+    
+    # Check for typeof without operand
+    if [[ "$expr" =~ ^typeof[[:space:]]*$ ]] || [[ "$expr" =~ [[:space:]]typeof[[:space:]]*$ ]]; then
+        echo -e "${RED}Error at line $line_num, column $col_num: 'typeof' without operand${NC}"
+        return 1
+    fi
+    
+    # Check for instanceof without right operand
+    if [[ "$expr" =~ instanceof[[:space:]]*$ ]]; then
+        echo -e "${RED}Error at line $line_num, column $col_num: 'instanceof' without right operand${NC}"
+        return 1
+    fi
+    
+    # Check for in without right operand
+    if [[ "$expr" =~ in[[:space:]]*$ ]]; then
+        echo -e "${RED}Error at line $line_num, column $col_num: 'in' without right operand${NC}"
+        return 1
+    fi
+    
+    # Check for arrow function without body
+    if [[ "$expr" =~ =\>[[:space:]]*$ ]]; then
+        echo -e "${RED}Error at line $line_num, column $col_num: Arrow function without body${NC}"
         return 1
     fi
     
@@ -466,7 +626,19 @@ check_template_syntax() {
                    [ "$last_non_ws_token" != "]" ] &&
                    [ "$last_non_ws_token" != "}" ] &&
                    [ "$last_non_ws_token" != "++" ] &&
-                   [ "$last_non_ws_token" != "--" ]; then
+                   [ "$last_non_ws_token" != "--" ] &&
+                   [ "$last_non_ws_token" != ";" ] &&
+                   [ "$last_non_ws_token" != "," ] &&
+                   [ "$last_non_ws_token" != ":" ] &&
+                   [ "$last_non_ws_token" != "=" ] &&
+                   [ "$last_non_ws_token" != "+" ] &&
+                   [ "$last_non_ws_token" != "-" ] &&
+                   [ "$last_non_ws_token" != "*" ] &&
+                   [ "$last_non_ws_token" != "/" ] &&
+                   [ "$last_non_ws_token" != "&&" ] &&
+                   [ "$last_non_ws_token" != "||" ] &&
+                   [ "$last_non_ws_token" != "??" ] &&
+                   [ "$last_non_ws_token" != "?" ]; then
                     in_regex=true
                 fi
                 
@@ -518,7 +690,7 @@ check_template_syntax() {
                 fi
                 
                 # Check for regex end
-                if $in_regex && [ "$char" = '/' ]; then
+                if $in_regex && [ "$char" = '/' ] && [ "$col" -gt 0 ] && [ "${line:$((col-1)):1}" != "\\" ]; then
                     # Check for regex flags
                     local check_col=$((col+1))
                     while [ $check_col -lt $line_length ]; do
@@ -574,7 +746,7 @@ check_template_syntax() {
                 
                 if [ -n "$token" ] && [ "$token_length" -gt 0 ]; then
                     # Validate general JavaScript syntax
-                    if ! validate_js_syntax "$line" "$line_number" "$col" "$token" "$last_token" "$last_non_ws_token"; then
+                    if ! validate_js_syntax "$line" "$line_number" "$col" "$token" "$last_token" "$last_non_ws_token" "$in_template"; then
                         echo "  $line"
                         printf "%*s^%s\n" $col "" "${RED}here${NC}"
                         echo "$(realpath "$filename")"
@@ -588,37 +760,8 @@ check_template_syntax() {
                     case "$token" in
                         # Check for invalid tagged templates
                         '`')
-                            if [ "$last_non_ws_token" = "" ] || \
-                               [ "$last_non_ws_token" = ";" ] || \
-                               [ "$last_non_ws_token" = "{" ] || \
-                               [ "$last_non_ws_token" = "}" ] || \
-                               [ "$last_non_ws_token" = "(" ] || \
-                               [ "$last_non_ws_token" = ")" ] || \
-                               [ "$last_non_ws_token" = "[" ] || \
-                               [ "$last_non_ws_token" = "]" ] || \
-                               [ "$last_non_ws_token" = "," ] || \
-                               [ "$last_non_ws_token" = ":" ] || \
-                               [ "$last_non_ws_token" = "?" ] || \
-                               [ "$last_non_ws_token" = "=>" ] || \
-                               [ "$last_non_ws_token" = "." ] || \
-                               [[ "$last_non_ws_token" =~ ^[0-9]+$ ]] || \
-                               [[ "$last_non_ws_token" =~ ^[0-9]+\.[0-9]*$ ]]; then
-                                # Invalid context for template start
-                                if [[ "$last_non_ws_token" =~ ^[0-9] ]]; then
-                                    echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Number cannot be used as template tag${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
-                                    echo "$(realpath "$filename")"
-                                    return 1
-                                fi
-                            fi
-                            ;;
-                            
-                        # Check for invalid expression operators in templates
-                        '++'|'--')
-                            # These have special rules in templates
-                            if $in_template && ! $in_template_expression && [ "$last_non_ws_token" = "$" ]; then
-                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Invalid operator in template literal${NC}"
+                            if [[ "$last_non_ws_token" =~ ^[0-9] ]]; then
+                                echo -e "${RED}Error at line $line_number, column $((col-token_length+2)): Number cannot be used as template tag${NC}"
                                 echo "  $line"
                                 printf "%*s^%s\n" $((col-token_length+1)) "" "${RED}here${NC}"
                                 echo "$(realpath "$filename")"
@@ -629,25 +772,11 @@ check_template_syntax() {
                         # Check for lonely $ in templates (not followed by {)
                         '$')
                             if $in_template && ! $in_template_expression && [ "$next_char" != "{" ]; then
-                                # Check if this is meant to be an escaped $
-                                local check_col=$((col+1))
-                                local found_brace=false
-                                while [ $check_col -lt $line_length ]; do
-                                    if [ "${line:$check_col:1}" = "{" ]; then
-                                        found_brace=true
-                                        break
-                                    elif ! is_whitespace "${line:$check_col:1}"; then
-                                        break
-                                    fi
-                                    ((check_col++))
-                                done
-                                if ! $found_brace; then
-                                    echo -e "${RED}Error at line $line_number, column $((col+1)): Lone $ in template literal (should be \${ or part of text)${NC}"
-                                    echo "  $line"
-                                    printf "%*s^%s\n" $col "" "${RED}here${NC}"
-                                    echo "$(realpath "$filename")"
-                                    return 1
-                                fi
+                                echo -e "${RED}Error at line $line_number, column $((col+1)): Lone $ in template literal (should be \${ or part of text)${NC}"
+                                echo "  $line"
+                                printf "%*s^%s\n" $col "" "${RED}here${NC}"
+                                echo "$(realpath "$filename")"
+                                return 1
                             fi
                             ;;
                             
@@ -685,21 +814,9 @@ check_template_syntax() {
                                             ;;
                                         'u')
                                             # Check for valid Unicode escape
-                                            if [ $((col+2)) -lt $line_length ] && [ $((col+3)) -lt $line_length ] && \
-                                               [ $((col+4)) -lt $line_length ] && [ $((col+5)) -lt $line_length ]; then
-                                                local hex1="${line:$((col+2)):1}"
-                                                local hex2="${line:$((col+3)):1}"
-                                                local hex3="${line:$((col+4)):1}"
-                                                local hex4="${line:$((col+5)):1}"
-                                                if ! [[ "$hex1$hex2$hex3$hex4" =~ ^[0-9a-fA-F]{4}$ ]]; then
-                                                    echo -e "${RED}Error at line $line_number, column $((col+1)): Invalid Unicode escape${NC}"
-                                                    echo "  $line"
-                                                    printf "%*s^%s\n" $col "" "${RED}here${NC}"
-                                                    echo "$(realpath "$filename")"
-                                                    return 1
-                                                fi
-                                            else
-                                                echo -e "${RED}Error at line $line_number, column $((col+1)): Incomplete Unicode escape${NC}"
+                                            if [ $((col+2)) -lt $line_length ] && [ "${line:$((col+2)):1}" = "{" ]; then
+                                                # Invalid - should be \uXXXX not \u{X}
+                                                echo -e "${RED}Error at line $line_number, column $((col+1)): Invalid Unicode escape sequence${NC}"
                                                 echo "  $line"
                                                 printf "%*s^%s\n" $col "" "${RED}here${NC}"
                                                 echo "$(realpath "$filename")"
@@ -708,17 +825,7 @@ check_template_syntax() {
                                             ;;
                                         'x')
                                             # Check for valid hex escape
-                                            if [ $((col+2)) -lt $line_length ] && [ $((col+3)) -lt $line_length ]; then
-                                                local hex1="${line:$((col+2)):1}"
-                                                local hex2="${line:$((col+3)):1}"
-                                                if ! [[ "$hex1$hex2" =~ ^[0-9a-fA-F]{2}$ ]]; then
-                                                    echo -e "${RED}Error at line $line_number, column $((col+1)): Invalid hex escape${NC}"
-                                                    echo "  $line"
-                                                    printf "%*s^%s\n" $col "" "${RED}here${NC}"
-                                                    echo "$(realpath "$filename")"
-                                                    return 1
-                                                fi
-                                            else
+                                            if [ $((col+2)) -ge $line_length ] || [ $((col+3)) -ge $line_length ]; then
                                                 echo -e "${RED}Error at line $line_number, column $((col+1)): Incomplete hex escape${NC}"
                                                 echo "  $line"
                                                 printf "%*s^%s\n" $col "" "${RED}here${NC}"
@@ -726,8 +833,8 @@ check_template_syntax() {
                                                 return 1
                                             fi
                                             ;;
-                                        [0-7])
-                                            # Octal escape (deprecated but still valid)
+                                        [0-9])
+                                            # Octal escape
                                             ;;
                                         'n'|'r'|'t'|'b'|'f'|'v'|"'")
                                             # Valid escape sequences
@@ -811,11 +918,11 @@ check_template_syntax() {
             in_comment_single=false
         fi
         
-        # Check for unterminated template expression at line end
-        if $in_template_expression; then
-            # Look for closing } on next lines or error
-            # We'll handle this in the main loop
-            :
+        # Check for unterminated strings at line end
+        if $in_string_single || $in_string_double; then
+            echo -e "${RED}Error: Unterminated string at line $line_number${NC}"
+            echo "$(realpath "$filename")"
+            return 1
         fi
         
     done < "$filename"

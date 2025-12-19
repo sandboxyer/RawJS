@@ -3,7 +3,7 @@
 # JavaScript Parameter Syntax Auditor - Pure Bash Implementation
 # Usage: ./params.sh <filename.js> [--test]
 
-AUDIT_SCRIPT_VERSION="1.2.0"
+AUDIT_SCRIPT_VERSION="1.3.0"
 TEST_DIR="params_tests"
 
 # Color codes for output
@@ -228,6 +228,82 @@ extract_tokens() {
     printf "%s\n" "${tokens[@]}"
 }
 
+# Function to check arrow function parameters
+check_arrow_params() {
+    local tokens="$1"
+    local line_number="$2"
+    local line="$3"
+    local filename="$4"
+    local token_idx="$5"
+    
+    # Parse tokens to check arrow function
+    local arrow_found=false
+    local before_arrow=""
+    local paren_count=0
+    local in_parens=false
+    
+    # Check tokens before the arrow
+    for ((i=0; i<token_idx; i++)); do
+        local token_info=$(echo "$tokens" | sed -n "$((i+1))p")
+        [ -z "$token_info" ] && break
+        
+        local token="${token_info%:*}"
+        local token_pos="${token_info#*:}"
+        
+        if [ "$token" = "(" ]; then
+            paren_count=$((paren_count + 1))
+            in_parens=true
+            before_arrow+="("
+        elif [ "$token" = ")" ]; then
+            paren_count=$((paren_count - 1))
+            before_arrow+=")"
+            if [ $paren_count -eq 0 ]; then
+                in_parens=false
+            fi
+        elif [ "$paren_count" -eq 0 ] && [ "$token" != "=" ] && [ "$token" != "async" ]; then
+            before_arrow+="$token"
+        fi
+    done
+    
+    # Trim whitespace from before_arrow
+    before_arrow=$(echo "$before_arrow" | tr -d '[:space:]')
+    
+    # Check if there were parentheses before arrow
+    if [ -z "$before_arrow" ]; then
+        # Empty arrow function: => - ERROR
+        report_error "$line_number" "1" "Missing parameters for arrow function" "$line" "$filename"
+        return 1
+    elif [[ "$before_arrow" == "(" ]]; then
+        # Only parentheses: () => - OK
+        return 0
+    elif [[ "$before_arrow" == ")" ]]; then
+        # Mismatched parentheses
+        report_error "$line_number" "1" "Mismatched parentheses in arrow function" "$line" "$filename"
+        return 1
+    elif [[ "$before_arrow" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*$ ]]; then
+        # Single identifier: x => - OK
+        return 0
+    elif [[ "$before_arrow" =~ ^\{.*\}$ ]]; then
+        # Object destructuring without parens: {x} => - ERROR
+        report_error "$line_number" "1" "Destructuring parameters require parentheses in arrow functions" "$line" "$filename"
+        return 1
+    elif [[ "$before_arrow" =~ ^\[.*\]$ ]]; then
+        # Array destructuring without parens: [x] => - ERROR
+        report_error "$line_number" "1" "Destructuring parameters require parentheses in arrow functions" "$line" "$filename"
+        return 1
+    elif [[ "$before_arrow" =~ ^[a-zA-Z_$][a-zA-Z0-9_$]*= ]]; then
+        # Default parameter without parens: x=5 => - ERROR
+        report_error "$line_number" "1" "Default parameters require parentheses in arrow functions" "$line" "$filename"
+        return 1
+    elif [[ "$before_arrow" =~ , ]] && ! [[ "$before_arrow" =~ ^\(.*\)$ ]]; then
+        # Multiple parameters without parens: x,y => - ERROR
+        report_error "$line_number" "1" "Multiple parameters require parentheses in arrow functions" "$line" "$filename"
+        return 1
+    fi
+    
+    return 0
+}
+
 # Main parameter syntax checking function
 check_param_syntax() {
     local filename="$1"
@@ -253,6 +329,9 @@ check_param_syntax() {
     local param_count=0
     local param_names=()
     local in_strict_mode=false
+    local in_arrow_function=false
+    local arrow_parens=false
+    local async_before_arrow=false
     
     while IFS= read -r line || [ -n "$line" ]; do
         ((line_number++))
@@ -273,6 +352,14 @@ check_param_syntax() {
             
             local token="${token_info%:*}"
             local token_pos="${token_info#*:}"
+            
+            # Check for arrow function
+            if [ "$token" = "=>" ]; then
+                in_arrow_function=true
+                if ! check_arrow_params "$tokens" "$line_number" "$line" "$filename" "$token_idx"; then
+                    return 1
+                fi
+            fi
             
             # Update context based on braces
             if [ "$token" = "{" ]; then
@@ -389,13 +476,6 @@ check_param_syntax() {
                 fi
             fi
             
-            # Handle arrow functions
-            if [ "$token" = "=>" ]; then
-                if ! $in_arrow_params && $in_param_list; then
-                    in_arrow_params=true
-                fi
-            fi
-            
             # Inside parameter list checks
             if $in_param_list; then
                 case "$token" in
@@ -484,7 +564,7 @@ check_param_syntax() {
                             # Check for duplicate parameters
                             for existing_param in "${param_names[@]}"; do
                                 if [ "$token" = "$existing_param" ]; then
-                                    if $in_strict_mode || $in_arrow_params; then
+                                    if $in_strict_mode || $in_arrow_function; then
                                         report_error "$line_number" "$((token_pos+1))" \
                                             "Duplicate parameter name '$token'" "$line" "$filename"
                                         return 1
@@ -537,14 +617,14 @@ check_param_syntax() {
             # Reset function states when we hit a brace
             if [ "$token" = "{" ] && ($in_function_decl || $in_method_decl || 
                 $in_constructor_decl || $in_generator_decl || $in_async_decl || 
-                $in_getter_setter || $in_arrow_params); then
+                $in_getter_setter || $in_arrow_function); then
                 in_function_decl=false
                 in_method_decl=false
                 in_constructor_decl=false
                 in_generator_decl=false
                 in_async_decl=false
                 in_getter_setter=false
-                in_arrow_params=false
+                in_arrow_function=false
                 getter_setter_type=""
             fi
             

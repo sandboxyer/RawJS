@@ -110,29 +110,473 @@ _start:
     je .possible_comment
     
     ; Update object/array literal tracking
-    ; We only care if we're at the top level of an object/array literal
     cmp al, '{'
     je .possible_object_start
     cmp al, '}'
-    je .possible_object_end
+    je .handle_close_brace
     cmp al, '['
     je .possible_array_start
     cmp al, ']'
-    je .possible_array_end
+    je .handle_close_bracket
     
     ; Handle whitespace
     call .is_whitespace
     jc .handle_whitespace
     
+    ; Check if we need to add semicolon before certain characters
+    cmp al, 'l'
+    je .check_if_let_needs_semicolon
+    cmp al, 'c'
+    je .check_if_const_needs_semicolon
+    cmp al, 'v'
+    je .check_if_var_needs_semicolon
+    
     ; Handle regular character
     mov [rdi], al
     inc rdi
     
-    ; Check if we need semicolon before this character
-    mov bl, al
-    mov r14, rbx                ; Save last char
-    
+    ; Update last character
+    mov r14, rax
     jmp .next_char
+
+.handle_close_brace:
+    ; Handle closing brace
+    mov [rdi], al
+    inc rdi
+    mov r14, rax
+    
+    ; Check if we're in an object literal
+    cmp r15, 1
+    jne .not_in_object_literal
+    ; Exiting object literal
+    mov r15, 0
+    
+.not_in_object_literal:
+    ; After closing brace, we might need semicolon
+    ; Check next non-whitespace character
+    push rsi
+    push rcx
+    push rax
+    
+    ; Save current position
+    mov rbx, rsi
+    inc rbx
+    dec rcx
+    
+.check_next_after_brace:
+    cmp rcx, 0
+    je .no_semicolon_after_brace
+    mov al, [rbx]
+    
+    ; Skip whitespace
+    cmp al, ' '
+    je .continue_check_brace
+    cmp al, 0x09
+    je .continue_check_brace
+    cmp al, 0x0A
+    je .continue_check_brace
+    cmp al, 0x0D
+    je .continue_check_brace
+    
+    ; Found next non-whitespace char
+    ; If it's 'l', 'c', or 'v', check if it's let/const/var
+    cmp al, 'l'
+    je .check_let_after_brace
+    cmp al, 'c'
+    je .check_const_after_brace
+    cmp al, 'v'
+    je .check_var_after_brace
+    
+    ; Not a variable declaration, no semicolon needed
+    jmp .no_semicolon_after_brace
+
+.check_let_after_brace:
+    ; Check if it's 'let'
+    cmp rcx, 3
+    jb .no_semicolon_after_brace
+    mov dl, [rbx + 1]
+    cmp dl, 'e'
+    jne .no_semicolon_after_brace
+    mov dl, [rbx + 2]
+    cmp dl, 't'
+    jne .no_semicolon_after_brace
+    
+    ; Check if followed by whitespace or semicolon
+    cmp rcx, 4
+    je .needs_semicolon_after_brace
+    mov dl, [rbx + 3]
+    cmp dl, ' '
+    je .needs_semicolon_after_brace
+    cmp dl, 0x09
+    je .needs_semicolon_after_brace
+    cmp dl, 0x0A
+    je .needs_semicolon_after_brace
+    cmp dl, 0x0D
+    je .needs_semicolon_after_brace
+    cmp dl, ';'
+    je .needs_semicolon_after_brace
+    jmp .no_semicolon_after_brace
+
+.check_const_after_brace:
+    ; Check if it's 'const'
+    cmp rcx, 5
+    jb .no_semicolon_after_brace
+    mov dl, [rbx + 1]
+    cmp dl, 'o'
+    jne .no_semicolon_after_brace
+    mov dl, [rbx + 2]
+    cmp dl, 'n'
+    jne .no_semicolon_after_brace
+    mov dl, [rbx + 3]
+    cmp dl, 's'
+    jne .no_semicolon_after_brace
+    mov dl, [rbx + 4]
+    cmp dl, 't'
+    jne .no_semicolon_after_brace
+    
+    ; Check if followed by whitespace or semicolon
+    cmp rcx, 6
+    je .needs_semicolon_after_brace
+    mov dl, [rbx + 5]
+    cmp dl, ' '
+    je .needs_semicolon_after_brace
+    cmp dl, 0x09
+    je .needs_semicolon_after_brace
+    cmp dl, 0x0A
+    je .needs_semicolon_after_brace
+    cmp dl, 0x0D
+    je .needs_semicolon_after_brace
+    cmp dl, ';'
+    je .needs_semicolon_after_brace
+    jmp .no_semicolon_after_brace
+
+.check_var_after_brace:
+    ; Check if it's 'var'
+    cmp rcx, 3
+    jb .no_semicolon_after_brace
+    mov dl, [rbx + 1]
+    cmp dl, 'a'
+    jne .no_semicolon_after_brace
+    mov dl, [rbx + 2]
+    cmp dl, 'r'
+    jne .no_semicolon_after_brace
+    
+    ; Check if followed by whitespace or semicolon
+    cmp rcx, 4
+    je .needs_semicolon_after_brace
+    mov dl, [rbx + 3]
+    cmp dl, ' '
+    je .needs_semicolon_after_brace
+    cmp dl, 0x09
+    je .needs_semicolon_after_brace
+    cmp dl, 0x0A
+    je .needs_semicolon_after_brace
+    cmp dl, 0x0D
+    je .needs_semicolon_after_brace
+    cmp dl, ';'
+    je .needs_semicolon_after_brace
+    jmp .no_semicolon_after_brace
+
+.continue_check_brace:
+    inc rbx
+    dec rcx
+    jmp .check_next_after_brace
+
+.needs_semicolon_after_brace:
+    ; Add semicolon after the brace
+    mov byte [rdi], ';'
+    inc rdi
+    
+.no_semicolon_after_brace:
+    pop rax
+    pop rcx
+    pop rsi
+    jmp .next_char
+
+.handle_close_bracket:
+    ; Handle closing bracket
+    mov [rdi], al
+    inc rdi
+    mov r14, rax
+    
+    ; Check if we're in an array literal
+    cmp r15, 1
+    jne .not_in_array_literal
+    ; Exiting array literal
+    mov r15, 0
+    
+.not_in_array_literal:
+    ; After closing bracket, we might need semicolon
+    ; Check next non-whitespace character
+    push rsi
+    push rcx
+    push rax
+    
+    ; Save current position
+    mov rbx, rsi
+    inc rbx
+    dec rcx
+    
+.check_next_after_bracket:
+    cmp rcx, 0
+    je .no_semicolon_after_bracket
+    mov al, [rbx]
+    
+    ; Skip whitespace
+    cmp al, ' '
+    je .continue_check_bracket
+    cmp al, 0x09
+    je .continue_check_bracket
+    cmp al, 0x0A
+    je .continue_check_bracket
+    cmp al, 0x0D
+    je .continue_check_bracket
+    
+    ; Found next non-whitespace char
+    ; If it's 'l', 'c', or 'v', check if it's let/const/var
+    cmp al, 'l'
+    je .check_let_after_bracket
+    cmp al, 'c'
+    je .check_const_after_bracket
+    cmp al, 'v'
+    je .check_var_after_bracket
+    
+    ; Not a variable declaration, no semicolon needed
+    jmp .no_semicolon_after_bracket
+
+.check_let_after_bracket:
+    ; Check if it's 'let'
+    cmp rcx, 3
+    jb .no_semicolon_after_bracket
+    mov dl, [rbx + 1]
+    cmp dl, 'e'
+    jne .no_semicolon_after_bracket
+    mov dl, [rbx + 2]
+    cmp dl, 't'
+    jne .no_semicolon_after_bracket
+    
+    ; Check if followed by whitespace or semicolon
+    cmp rcx, 4
+    je .needs_semicolon_after_bracket
+    mov dl, [rbx + 3]
+    cmp dl, ' '
+    je .needs_semicolon_after_bracket
+    cmp dl, 0x09
+    je .needs_semicolon_after_bracket
+    cmp dl, 0x0A
+    je .needs_semicolon_after_bracket
+    cmp dl, 0x0D
+    je .needs_semicolon_after_bracket
+    cmp dl, ';'
+    je .needs_semicolon_after_bracket
+    jmp .no_semicolon_after_bracket
+
+.check_const_after_bracket:
+    ; Check if it's 'const'
+    cmp rcx, 5
+    jb .no_semicolon_after_bracket
+    mov dl, [rbx + 1]
+    cmp dl, 'o'
+    jne .no_semicolon_after_bracket
+    mov dl, [rbx + 2]
+    cmp dl, 'n'
+    jne .no_semicolon_after_bracket
+    mov dl, [rbx + 3]
+    cmp dl, 's'
+    jne .no_semicolon_after_bracket
+    mov dl, [rbx + 4]
+    cmp dl, 't'
+    jne .no_semicolon_after_bracket
+    
+    ; Check if followed by whitespace or semicolon
+    cmp rcx, 6
+    je .needs_semicolon_after_bracket
+    mov dl, [rbx + 5]
+    cmp dl, ' '
+    je .needs_semicolon_after_bracket
+    cmp dl, 0x09
+    je .needs_semicolon_after_bracket
+    cmp dl, 0x0A
+    je .needs_semicolon_after_bracket
+    cmp dl, 0x0D
+    je .needs_semicolon_after_bracket
+    cmp dl, ';'
+    je .needs_semicolon_after_bracket
+    jmp .no_semicolon_after_bracket
+
+.check_var_after_bracket:
+    ; Check if it's 'var'
+    cmp rcx, 3
+    jb .no_semicolon_after_bracket
+    mov dl, [rbx + 1]
+    cmp dl, 'a'
+    jne .no_semicolon_after_bracket
+    mov dl, [rbx + 2]
+    cmp dl, 'r'
+    jne .no_semicolon_after_bracket
+    
+    ; Check if followed by whitespace or semicolon
+    cmp rcx, 4
+    je .needs_semicolon_after_bracket
+    mov dl, [rbx + 3]
+    cmp dl, ' '
+    je .needs_semicolon_after_bracket
+    cmp dl, 0x09
+    je .needs_semicolon_after_bracket
+    cmp dl, 0x0A
+    je .needs_semicolon_after_bracket
+    cmp dl, 0x0D
+    je .needs_semicolon_after_bracket
+    cmp dl, ';'
+    je .needs_semicolon_after_bracket
+    jmp .no_semicolon_after_bracket
+
+.continue_check_bracket:
+    inc rbx
+    dec rcx
+    jmp .check_next_after_bracket
+
+.needs_semicolon_after_bracket:
+    ; Add semicolon after the bracket
+    mov byte [rdi], ';'
+    inc rdi
+    
+.no_semicolon_after_bracket:
+    pop rax
+    pop rcx
+    pop rsi
+    jmp .next_char
+
+.check_if_let_needs_semicolon:
+    ; Check if we need semicolon before 'let'
+    cmp rcx, 3
+    jb .copy_char
+    
+    ; Verify it's actually 'let'
+    mov bl, [rsi + 1]
+    cmp bl, 'e'
+    jne .copy_char
+    mov bl, [rsi + 2]
+    cmp bl, 't'
+    jne .copy_char
+    
+    ; Check if next char is whitespace or semicolon
+    cmp rcx, 4
+    je .check_prev_for_semicolon
+    mov bl, [rsi + 3]
+    cmp bl, ' '
+    je .check_prev_for_semicolon
+    cmp bl, 0x09
+    je .check_prev_for_semicolon
+    cmp bl, 0x0A
+    je .check_prev_for_semicolon
+    cmp bl, 0x0D
+    je .check_prev_for_semicolon
+    cmp bl, ';'
+    je .check_prev_for_semicolon
+    jmp .copy_char
+
+.check_if_const_needs_semicolon:
+    ; Check if we need semicolon before 'const'
+    cmp rcx, 5
+    jb .copy_char
+    
+    ; Verify it's actually 'const'
+    mov bl, [rsi + 1]
+    cmp bl, 'o'
+    jne .copy_char
+    mov bl, [rsi + 2]
+    cmp bl, 'n'
+    jne .copy_char
+    mov bl, [rsi + 3]
+    cmp bl, 's'
+    jne .copy_char
+    mov bl, [rsi + 4]
+    cmp bl, 't'
+    jne .copy_char
+    
+    ; Check if next char is whitespace or semicolon
+    cmp rcx, 6
+    je .check_prev_for_semicolon
+    mov bl, [rsi + 5]
+    cmp bl, ' '
+    je .check_prev_for_semicolon
+    cmp bl, 0x09
+    je .check_prev_for_semicolon
+    cmp bl, 0x0A
+    je .check_prev_for_semicolon
+    cmp bl, 0x0D
+    je .check_prev_for_semicolon
+    cmp bl, ';'
+    je .check_prev_for_semicolon
+    jmp .copy_char
+
+.check_if_var_needs_semicolon:
+    ; Check if we need semicolon before 'var'
+    cmp rcx, 3
+    jb .copy_char
+    
+    ; Verify it's actually 'var'
+    mov bl, [rsi + 1]
+    cmp bl, 'a'
+    jne .copy_char
+    mov bl, [rsi + 2]
+    cmp bl, 'r'
+    jne .copy_char
+    
+    ; Check if next char is whitespace or semicolon
+    cmp rcx, 4
+    je .check_prev_for_semicolon
+    mov bl, [rsi + 3]
+    cmp bl, ' '
+    je .check_prev_for_semicolon
+    cmp bl, 0x09
+    je .check_prev_for_semicolon
+    cmp bl, 0x0A
+    je .check_prev_for_semicolon
+    cmp bl, 0x0D
+    je .check_prev_for_semicolon
+    cmp bl, ';'
+    je .check_prev_for_semicolon
+    jmp .copy_char
+
+.check_prev_for_semicolon:
+    ; Check if we need semicolon before this keyword
+    cmp rdi, output_buffer
+    je .no_semicolon_before_keyword
+    
+    ; Look at last character in output
+    mov bl, [rdi - 1]
+    
+    ; Check if last char needs semicolon before keyword
+    cmp bl, '}'
+    je .add_semicolon_before_keyword
+    cmp bl, ')'
+    je .add_semicolon_before_keyword
+    cmp bl, ']'
+    je .add_semicolon_before_keyword
+    cmp bl, '"'
+    je .add_semicolon_before_keyword
+    cmp bl, "'"
+    je .add_semicolon_before_keyword
+    cmp bl, '`'
+    je .add_semicolon_before_keyword
+    
+    ; Check if it's an identifier character
+    push rax
+    mov al, bl
+    call .is_identifier_char_al
+    pop rax
+    jc .add_semicolon_before_keyword
+    
+.no_semicolon_before_keyword:
+    jmp .copy_char
+
+.add_semicolon_before_keyword:
+    ; Add semicolon before keyword
+    mov byte [rdi], ';'
+    inc rdi
+    jmp .copy_char
 
 .handle_whitespace:
     ; Check what type of whitespace
@@ -216,7 +660,6 @@ _start:
     je .skip_char
     
     ; Check if next non-whitespace char starts a control statement
-    ; that requires a preceding semicolon
     push rsi
     push rcx
     push rax
@@ -242,18 +685,11 @@ _start:
     je .continue_peek
     
     ; Check if next token starts a control statement
-    ; We need to check for: if, for, while, do, else, switch, try, catch, finally
-    ; But only if we're not in an object/array literal
-    
-    ; First, check if it's a letter
     cmp al, 'a'
     jb .no_control_statement
     cmp al, 'z'
     ja .no_control_statement
     
-    ; We'll check the specific cases when we encounter them
-    ; For now, we know it's a letter, so we should add semicolon
-    ; when last char was } ) ] " ' ` or identifier
     jmp .should_add_semicolon
     
 .continue_peek:
@@ -279,7 +715,6 @@ _start:
 
 .possible_object_start:
     ; Check if this is an object literal or a block
-    ; Look at previous character to determine context
     cmp rsi, input_buffer
     je .is_block                ; At start of file, must be block
     
@@ -324,23 +759,9 @@ _start:
     mov r15, 1
     jmp .copy_char
 
-.possible_object_end:
-    ; End of object/block
-    cmp r15, 1
-    jne .copy_char            ; Not in object literal
-    mov r15, 0                ; Exit object literal
-    jmp .copy_char
-
 .possible_array_start:
     ; Start of array literal
     mov r15, 1
-    jmp .copy_char
-
-.possible_array_end:
-    ; End of array literal
-    cmp r15, 1
-    jne .copy_char            ; Not in array literal
-    mov r15, 0                ; Exit array literal
     jmp .copy_char
 
 .start_string_single:
@@ -360,6 +781,11 @@ _start:
     inc rdi
     mov r14, rax                ; Save last char
     jmp .next_char
+
+.next_char:
+    inc rsi
+    dec rcx
+    jmp .minify_loop
 
 .in_string:
     mov [rdi], al
@@ -465,11 +891,6 @@ _start:
     sub rcx, 2
     jmp .minify_loop
 
-.next_char:
-    inc rsi
-    dec rcx
-    jmp .minify_loop
-
 .minify_done:
     ; Calculate output length
     mov r11, rdi
@@ -514,20 +935,20 @@ _start:
 
 .is_identifier_char:
     cmp bl, '0'
-    jb .check_letters
+    jb .check_letters_id
     cmp bl, '9'
     jbe .is_id_yes
-.check_letters:
+.check_letters_id:
     cmp bl, 'A'
-    jb .check_lower
+    jb .check_lower_id
     cmp bl, 'Z'
     jbe .is_id_yes
-.check_lower:
+.check_lower_id:
     cmp bl, 'a'
-    jb .check_special
+    jb .check_special_id
     cmp bl, 'z'
     jbe .is_id_yes
-.check_special:
+.check_special_id:
     cmp bl, '_'
     je .is_id_yes
     cmp bl, '$'
@@ -535,6 +956,33 @@ _start:
     clc
     ret
 .is_id_yes:
+    stc
+    ret
+
+.is_identifier_char_al:
+    ; Check if character in AL is identifier char
+    cmp al, '0'
+    jb .check_letters_al
+    cmp al, '9'
+    jbe .is_id_yes_al
+.check_letters_al:
+    cmp al, 'A'
+    jb .check_lower_al
+    cmp al, 'Z'
+    jbe .is_id_yes_al
+.check_lower_al:
+    cmp al, 'a'
+    jb .check_special_al
+    cmp al, 'z'
+    jbe .is_id_yes_al
+.check_special_al:
+    cmp al, '_'
+    je .is_id_yes_al
+    cmp al, '$'
+    je .is_id_yes_al
+    clc
+    ret
+.is_id_yes_al:
     stc
     ret
 

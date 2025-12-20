@@ -130,6 +130,8 @@ _start:
     je .check_if_const_needs_semicolon
     cmp al, 'v'
     je .check_if_var_needs_semicolon
+    cmp al, 'f'
+    je .check_if_function_needs_semicolon
     
     ; Handle regular character
     mov [rdi], al
@@ -179,15 +181,17 @@ _start:
     je .continue_check_brace
     
     ; Found next non-whitespace char
-    ; If it's 'l', 'c', or 'v', check if it's let/const/var
+    ; Check if it's a character that needs semicolon before it
     cmp al, 'l'
     je .check_let_after_brace
     cmp al, 'c'
     je .check_const_after_brace
     cmp al, 'v'
     je .check_var_after_brace
+    cmp al, 'f'
+    je .check_function_after_brace
     
-    ; Not a variable declaration, no semicolon needed
+    ; Not a variable/function declaration, no semicolon needed
     jmp .no_semicolon_after_brace
 
 .check_let_after_brace:
@@ -277,6 +281,48 @@ _start:
     je .needs_semicolon_after_brace
     jmp .no_semicolon_after_brace
 
+.check_function_after_brace:
+    ; Check if it's 'function'
+    cmp rcx, 8
+    jb .no_semicolon_after_brace
+    mov dl, [rbx + 1]
+    cmp dl, 'u'
+    jne .no_semicolon_after_brace
+    mov dl, [rbx + 2]
+    cmp dl, 'n'
+    jne .no_semicolon_after_brace
+    mov dl, [rbx + 3]
+    cmp dl, 'c'
+    jne .no_semicolon_after_brace
+    mov dl, [rbx + 4]
+    cmp dl, 't'
+    jne .no_semicolon_after_brace
+    mov dl, [rbx + 5]
+    cmp dl, 'i'
+    jne .no_semicolon_after_brace
+    mov dl, [rbx + 6]
+    cmp dl, 'o'
+    jne .no_semicolon_after_brace
+    mov dl, [rbx + 7]
+    cmp dl, 'n'
+    jne .no_semicolon_after_brace
+    
+    ; Check if followed by whitespace or semicolon
+    cmp rcx, 9
+    je .needs_semicolon_after_brace
+    mov dl, [rbx + 8]
+    cmp dl, ' '
+    je .needs_semicolon_after_brace
+    cmp dl, 0x09
+    je .needs_semicolon_after_brace
+    cmp dl, 0x0A
+    je .needs_semicolon_after_brace
+    cmp dl, 0x0D
+    je .needs_semicolon_after_brace
+    cmp dl, ';'
+    je .needs_semicolon_after_brace
+    jmp .no_semicolon_after_brace
+
 .continue_check_brace:
     inc rbx
     dec rcx
@@ -333,15 +379,17 @@ _start:
     je .continue_check_bracket
     
     ; Found next non-whitespace char
-    ; If it's 'l', 'c', or 'v', check if it's let/const/var
+    ; Check if it's a character that needs semicolon before it
     cmp al, 'l'
     je .check_let_after_bracket
     cmp al, 'c'
     je .check_const_after_bracket
     cmp al, 'v'
     je .check_var_after_bracket
+    cmp al, 'f'
+    je .check_function_after_bracket
     
-    ; Not a variable declaration, no semicolon needed
+    ; Not a variable/function declaration, no semicolon needed
     jmp .no_semicolon_after_bracket
 
 .check_let_after_bracket:
@@ -419,6 +467,48 @@ _start:
     cmp rcx, 4
     je .needs_semicolon_after_bracket
     mov dl, [rbx + 3]
+    cmp dl, ' '
+    je .needs_semicolon_after_bracket
+    cmp dl, 0x09
+    je .needs_semicolon_after_bracket
+    cmp dl, 0x0A
+    je .needs_semicolon_after_bracket
+    cmp dl, 0x0D
+    je .needs_semicolon_after_bracket
+    cmp dl, ';'
+    je .needs_semicolon_after_bracket
+    jmp .no_semicolon_after_bracket
+
+.check_function_after_bracket:
+    ; Check if it's 'function'
+    cmp rcx, 8
+    jb .no_semicolon_after_bracket
+    mov dl, [rbx + 1]
+    cmp dl, 'u'
+    jne .no_semicolon_after_bracket
+    mov dl, [rbx + 2]
+    cmp dl, 'n'
+    jne .no_semicolon_after_bracket
+    mov dl, [rbx + 3]
+    cmp dl, 'c'
+    jne .no_semicolon_after_bracket
+    mov dl, [rbx + 4]
+    cmp dl, 't'
+    jne .no_semicolon_after_bracket
+    mov dl, [rbx + 5]
+    cmp dl, 'i'
+    jne .no_semicolon_after_bracket
+    mov dl, [rbx + 6]
+    cmp dl, 'o'
+    jne .no_semicolon_after_bracket
+    mov dl, [rbx + 7]
+    cmp dl, 'n'
+    jne .no_semicolon_after_bracket
+    
+    ; Check if followed by whitespace or semicolon
+    cmp rcx, 9
+    je .needs_semicolon_after_bracket
+    mov dl, [rbx + 8]
     cmp dl, ' '
     je .needs_semicolon_after_bracket
     cmp dl, 0x09
@@ -528,6 +618,50 @@ _start:
     cmp rcx, 4
     je .check_prev_for_semicolon
     mov bl, [rsi + 3]
+    cmp bl, ' '
+    je .check_prev_for_semicolon
+    cmp bl, 0x09
+    je .check_prev_for_semicolon
+    cmp bl, 0x0A
+    je .check_prev_for_semicolon
+    cmp bl, 0x0D
+    je .check_prev_for_semicolon
+    cmp bl, ';'
+    je .check_prev_for_semicolon
+    jmp .copy_char
+
+.check_if_function_needs_semicolon:
+    ; Check if we need semicolon before 'function'
+    cmp rcx, 8
+    jb .copy_char
+    
+    ; Verify it's actually 'function'
+    mov bl, [rsi + 1]
+    cmp bl, 'u'
+    jne .copy_char
+    mov bl, [rsi + 2]
+    cmp bl, 'n'
+    jne .copy_char
+    mov bl, [rsi + 3]
+    cmp bl, 'c'
+    jne .copy_char
+    mov bl, [rsi + 4]
+    cmp bl, 't'
+    jne .copy_char
+    mov bl, [rsi + 5]
+    cmp bl, 'i'
+    jne .copy_char
+    mov bl, [rsi + 6]
+    cmp bl, 'o'
+    jne .copy_char
+    mov bl, [rsi + 7]
+    cmp bl, 'n'
+    jne .copy_char
+    
+    ; Check if next char is whitespace or semicolon
+    cmp rcx, 9
+    je .check_prev_for_semicolon
+    mov bl, [rsi + 8]
     cmp bl, ' '
     je .check_prev_for_semicolon
     cmp bl, 0x09

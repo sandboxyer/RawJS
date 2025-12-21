@@ -897,6 +897,14 @@ process_close_brace:
     ; Check if top level
     cmp dword [brace_depth], 0
     jne .done_brace
+
+    ; Check if we're inside an array literal
+    cmp dword [bracket_depth], 0
+    jg .done_brace  ; Inside array - don't print yet
+    
+    ; Check if we're inside parentheses
+    cmp dword [paren_depth], 0
+    jg .done_brace  ; Inside parens - don't print yet
     
     call check_empty_statement
     cmp byte [empty_statement], 1

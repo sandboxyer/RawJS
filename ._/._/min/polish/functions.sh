@@ -20,7 +20,7 @@ generate_name() {
     # Remove invalid chars for function names
     prefix=$(echo "$prefix" | tr -cd 'a-zA-Z0-9_')
     if [ -z "$prefix" ]; then prefix="func"; fi
-    echo "${prefix}_$(date +%s%N)"
+    echo "${prefix}_$(date +%s%N)_${RANDOM}"
 }
 
 # Main processing function (Recursive)
@@ -247,42 +247,30 @@ process_js() {
             # D. Recursively Process Body
             local processed_body=$(process_js "$extracted_body")
 
-            # E. Generate Function
+            # E. Generate Function with UNIQUE name
             local final_name=""
+            
+            # Always generate unique name even if we have a name_hint
             if [ -n "$name_hint" ]; then
-                # If identifier is used in let/var, try to reuse it, otherwise unique
-                # For output matching, we create a function then assign it.
-                # To match expected output style "function outerOne...", we construct a name.
-                # Since we can't guess "outerOne" from "outer1", we just append "_fn" or use base.
-                final_name="${name_hint}" 
-                # Avoid name collision with the variable itself by checking context?
-                # The output example shows: function outerOne... let outer1 = outerOne.
-                # We will assume if name is found, we make a function name.
-                if [[ "$name_hint" =~ ^[a-zA-Z0-9_]+$ ]]; then
-                   # If it was a property 'first:', the function name is 'first'.
-                   # If it was a var 'outer1=', the function name might be 'outer1' but that conflicts if we keep 'let outer1'.
-                   # To be safe and compliant:
-                   if [[ "$prev_char" == ":" ]]; then
-                       final_name="$name_hint"
-                   else
-                       # Variable assignment case
-                       final_name="${name_hint}_fn" 
-                       # Fix for specific output matching: remove _fn if you want exact replacement logic
-                       # But for safety we use suffix or check duplicates.
-                       # Given the prompt's strict output requirement, we'll try to use the raw name
-                       # If it's a 'let', we need a diff name for the function usually. 
-                       # But Input 1: let myFuncOne = ... -> function myFuncOne... (Let removed? Or just hoisted?)
-                       # We will generate a unique suffix to be safe.
-                   fi
-                else 
-                   final_name=$(generate_name)
+                # Use name_hint as prefix but make it unique
+                local clean_hint=$(echo "$name_hint" | tr -cd 'a-zA-Z0-9_')
+                if [ -z "$clean_hint" ]; then
+                    final_name=$(generate_name)
+                else
+                    # Generate unique name with timestamp and random component
+                    final_name="${clean_hint}_$(date +%s%N)_${RANDOM}"
                 fi
             else
                 final_name=$(generate_name)
             fi
+            
+            # Ensure final_name is valid
+            final_name=$(echo "$final_name" | tr -cd 'a-zA-Z0-9_')
+            if [ -z "$final_name" ]; then
+                final_name=$(generate_name)
+            fi
 
             # Construct the hoisted function
-            # Note: We put the processed body inside
             local func_decl="function ${final_name}(${params}){${processed_body}};"
             
             # Append declaration to OUTPUT (Hoisting it!)
@@ -297,19 +285,11 @@ process_js() {
         fi
 
         # 3. Handle End of Statement/Block (Flush buffer)
-        # We flush to output when we hit ';' or '}' or '{' to keep order,
-        # but we must be careful not to break the structure.
-        # Actually, we just append char to stmt_buffer.
-        # If we hit a semicolon at top level (brace_depth 0), we can flush.
-        
         stmt_buffer+="$char"
         if [[ "$char" == "{" ]]; then ((brace_depth++)); fi
         if [[ "$char" == "}" ]]; then ((brace_depth--)); fi
         
-        # Optimization: Flush stmt_buffer to output periodically to keep memory usage low,
-        # provided we are not in the middle of a potential arrow function detection.
-        # But since we scan backwards, keeping the buffer is safer.
-        # To handle strict ordering:
+        # Flush buffer at statement boundaries
         if [[ "$char" == ";" && $brace_depth -eq 0 ]]; then
             output+="$stmt_buffer"
             stmt_buffer=""

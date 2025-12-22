@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# build.sh - Processes ../arch_output file with tag-based content execution
+# build.sh - Optimized version with single-pass processing
 # Added execution time tracking with --silent option
 
 # Set strict mode for better error handling
@@ -30,6 +30,11 @@ TOTAL_EXECUTION_TIME=0
 
 # Silent mode flag
 SILENT_MODE=false
+
+# Buffer for accumulating content
+declare -a TAG_BUFFER=()
+CURRENT_TAG=""
+CURRENT_CONTENT=""
 
 # Function to get current timestamp in milliseconds
 get_timestamp_ms() {
@@ -416,39 +421,28 @@ handle_chain_block() {
     fi
 }
 
-# Function to extract complete chain block including outer tags
-extract_chain_block() {
-    local content="$1"
-    local start_pos="$2"
+# Function to process buffered content when a tag ends
+process_buffered_content() {
+    local content="$CURRENT_CONTENT"
+    local tag="$CURRENT_TAG"
     
-    local depth=1
-    local pos=$((start_pos + 13))  # Skip past the opening <chain-start>
-    local content_length=${#content}
-    local block_start=$start_pos
+    # Trim whitespace
+    content=$(echo "$content" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     
-    while [[ $pos -lt $content_length ]]; do
-        # Check for <chain-start>
-        if [[ "${content:$pos:13}" == "<chain-start>" ]]; then
-            depth=$((depth + 1))
-            pos=$((pos + 13))
-        # Check for <chain-end>
-        elif [[ "${content:$pos:11}" == "<chain-end>" ]]; then
-            depth=$((depth - 1))
-            if [[ $depth -eq 0 ]]; then
-                # Found the matching closing tag
-                local block_end=$((pos + 11))
-                # Extract the complete block including outer tags
-                echo "${content:block_start:$((block_end - block_start))}"
-                return 0
-            fi
-            pos=$((pos + 11))
-        else
-            pos=$((pos + 1))
-        fi
-    done
+    if [[ -n "$content" ]]; then
+        case "$tag" in
+            "<js-start>")
+                handle_js_content "$content"
+                ;;
+            "<chain-start>")
+                handle_chain_block "$content"
+                ;;
+        esac
+    fi
     
-    echo ""
-    return 1
+    # Reset buffer
+    CURRENT_CONTENT=""
+    CURRENT_TAG=""
 }
 
 # Main function to process the arch_output file
@@ -477,91 +471,102 @@ main() {
     mkdir -p "$JS_DIR"
     mkdir -p "$CHAIN_DIR"
     
-    # Read the entire file content
-    local file_content
-    file_content=$(cat "$ARCH_OUTPUT")
-    local content_length=${#file_content}
-    local pos=0
+    # Read the file line by line (much faster than reading entire file at once)
+    local line
+    local in_tag=0
+    local chain_depth=0
+    local chain_buffer=""
+    local in_chain=0
     
-    if [[ "$SILENT_MODE" == false ]]; then
-        log_info "Processing ${content_length} characters of input"
+    while IFS= read -r line; do
+        # If we're inside a chain block, buffer everything
+        if [[ $in_chain -eq 1 ]]; then
+            chain_buffer+="$line"$'\n'
+            
+            # Check for chain tags in this line
+            if [[ "$line" == *"<chain-start>"* ]]; then
+                ((chain_depth++))
+            fi
+            
+            if [[ "$line" == *"<chain-end>"* ]]; then
+                ((chain_depth--))
+                if [[ $chain_depth -eq 0 ]]; then
+                    # End of chain block reached
+                    handle_chain_block "$chain_buffer"
+                    chain_buffer=""
+                    in_chain=0
+                fi
+            fi
+            continue
+        fi
+        
+        # Check for chain-start tags (special handling for nested chains)
+        if [[ "$line" == *"<chain-start>"* ]]; then
+            if [[ $in_tag -eq 0 ]]; then
+                # Start buffering chain content
+                chain_buffer="$line"$'\n'
+                in_chain=1
+                chain_depth=1
+                continue
+            fi
+        fi
+        
+        # Process regular tags with state machine
+        if [[ $in_tag -eq 0 ]]; then
+            # Looking for opening tags
+            if [[ "$line" == *"<js-start>"* ]]; then
+                CURRENT_TAG="<js-start>"
+                in_tag=1
+                # Remove everything before the tag
+                line="${line#*<js-start>}"
+            fi
+        fi
+        
+        if [[ $in_tag -eq 1 ]]; then
+            # Inside a tag, look for closing tag
+            if [[ "$line" == *"<js-end>"* ]]; then
+                # Add content before closing tag
+                CURRENT_CONTENT+="${line%<js-end>*}"
+                process_buffered_content
+                
+                # Continue with remaining part of line after closing tag
+                remaining="${line#*<js-end>}"
+                if [[ -n "$remaining" ]]; then
+                    # Check if there's another opening tag in the remaining part
+                    if [[ "$remaining" == *"<js-start>"* ]]; then
+                        CURRENT_TAG="<js-start>"
+                        in_tag=1
+                        CURRENT_CONTENT="${remaining#*<js-start>}"
+                    else
+                        in_tag=0
+                    fi
+                else
+                    in_tag=0
+                fi
+            else
+                # No closing tag in this line, add entire line to content
+                CURRENT_CONTENT+="$line"$'\n'
+            fi
+        else
+            # Not in a tag, check for opening tags in current line
+            if [[ "$line" == *"<js-start>"* ]]; then
+                CURRENT_TAG="<js-start>"
+                in_tag=1
+                CURRENT_CONTENT="${line#*<js-start>}"
+            fi
+        fi
+    done < "$ARCH_OUTPUT"
+    
+    # Handle any remaining buffered content
+    if [[ -n "$CURRENT_CONTENT" && -n "$CURRENT_TAG" ]]; then
+        process_buffered_content
     fi
     
-    # Process the file
-    while [[ $pos -lt $content_length ]]; do
-        # Look for the next opening tag from current position
-        local next_js=${file_content:$pos}
-        local js_index=$(echo "$next_js" | grep -b -o "<js-start>" | head -1 | cut -d: -f1 2>/dev/null || echo "")
-        
-        local next_chain=${file_content:$pos}
-        local chain_index=$(echo "$next_chain" | grep -b -o "<chain-start>" | head -1 | cut -d: -f1 2>/dev/null || echo "")
-        
-        # Convert to absolute positions
-        local js_pos=-1
-        local chain_pos=-1
-        
-        if [[ -n "$js_index" && "$js_index" =~ ^[0-9]+$ ]]; then
-            js_pos=$((pos + js_index))
-        fi
-        
-        if [[ -n "$chain_index" && "$chain_index" =~ ^[0-9]+$ ]]; then
-            chain_pos=$((pos + chain_index))
-        fi
-        
-        # Determine which tag comes first
-        if [[ $js_pos -ge 0 && ( $chain_pos -lt 0 || $js_pos -lt $chain_pos ) ]]; then
-            # Process JS tag
-            pos=$js_pos
-            
-            # Find matching js-end
-            local remaining="${file_content:$pos}"
-            local js_end_index=$(echo "$remaining" | grep -b -o "<js-end>" | head -1 | cut -d: -f1 2>/dev/null || echo "")
-            
-            if [[ -z "$js_end_index" ]]; then
-                log_error "Unclosed <js-start> tag at position $pos"
-                error_count=$((error_count + 1))
-                break
-            fi
-            
-            local js_end_pos=$((pos + js_end_index))
-            local content_start=$((pos + 10))
-            local content_end=$js_end_pos
-            local js_content="${file_content:content_start:$((content_end - content_start))}"
-            
-            # Trim whitespace
-            js_content=$(echo "$js_content" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-            
-            if [[ -n "$js_content" ]]; then
-                handle_js_content "$js_content"
-            fi
-            
-            pos=$((js_end_pos + 7))
-            
-        elif [[ $chain_pos -ge 0 && ( $js_pos -lt 0 || $chain_pos -lt $js_pos ) ]]; then
-            # Process chain tag
-            pos=$chain_pos
-            
-            # Extract the complete chain block
-            local chain_block
-            chain_block=$(extract_chain_block "$file_content" "$pos")
-            
-            if [[ -z "$chain_block" ]]; then
-                log_error "Unclosed <chain-start> tag at position $pos"
-                error_count=$((error_count + 1))
-                break
-            fi
-            
-            # Process the chain block
-            handle_chain_block "$chain_block"
-            
-            # Move past the entire block
-            pos=$((pos + ${#chain_block}))
-            
-        else
-            # No more tags found
-            break
-        fi
-    done
+    # Handle any incomplete chain block
+    if [[ $in_chain -eq 1 ]]; then
+        log_error "Unclosed chain block detected"
+        error_count=$((error_count + 1))
+    fi
     
     # Calculate total execution time
     local END_TIME=$(get_timestamp_ms)

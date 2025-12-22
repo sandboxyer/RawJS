@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # build.sh - Processes ../arch_output file with tag-based content execution
-# Added execution time tracking
+# Added execution time tracking with --silent option
 
 # Set strict mode for better error handling
 set -euo pipefail
 
 # Configuration
 ARCH_OUTPUT="../arch_output"
-BASH_RUNNER="../basm/basm.sh"
+BASH_RUNNER="../basm/sbasm.sh"
 JS_DIR="js/"
 CHAIN_DIR="chain/"
 
@@ -23,8 +23,13 @@ NC='\033[0m' # No Color
 processed_count=0
 error_count=0
 
-# Start time tracking (global variable)
+# Time tracking variables
 START_TIME=0
+TOTAL_CREATION_TIME=0
+TOTAL_EXECUTION_TIME=0
+
+# Silent mode flag
+SILENT_MODE=false
 
 # Function to get current timestamp in milliseconds
 get_timestamp_ms() {
@@ -44,17 +49,22 @@ format_duration() {
     fi
 }
 
-# Function to log messages
+# Function to log messages (respects silent mode)
 log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+    if [[ "$SILENT_MODE" == false ]]; then
+        echo -e "${GREEN}[INFO]${NC} $1"
+    fi
 }
 
 log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+    if [[ "$SILENT_MODE" == false ]]; then
+        echo -e "${YELLOW}[WARN]${NC} $1"
+    fi
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    # Always show errors
+    echo -e "${RED}[ERROR]${NC} $1" >&2
 }
 
 # Function to check if content is a declaration
@@ -96,22 +106,35 @@ check_asm_exists() {
     fi
 }
 
-# Function to create temporary content file
+# Function to create temporary content file with time tracking
 create_temp_file() {
     local file_path="$1"
     local content="$2"
+    local creation_start_time=0
     
     # Create directory if it doesn't exist
     mkdir -p "$(dirname "$file_path")"
     
+    # Start creation time tracking
+    creation_start_time=$(get_timestamp_ms)
+    
     # Write content to file
     echo -n "$content" > "$file_path"
     
-    if [[ $? -eq 0 ]]; then
-        log_info "Created file: $file_path"
+    local result=$?
+    local creation_end_time=$(get_timestamp_ms)
+    local creation_duration=$((creation_end_time - creation_start_time))
+    
+    # Track total creation time
+    TOTAL_CREATION_TIME=$((TOTAL_CREATION_TIME + creation_duration))
+    
+    if [[ $result -eq 0 ]]; then
+        if [[ "$SILENT_MODE" == false ]]; then
+            log_info "Created file: $file_path ($(format_duration $creation_duration))"
+        fi
         return 0
     else
-        log_error "Failed to create file: $file_path"
+        log_error "Failed to create file: $file_path ($(format_duration $creation_duration))"
         return 1
     fi
 }
@@ -119,29 +142,39 @@ create_temp_file() {
 # Function to execute basm.sh and wait for completion
 execute_basm() {
     local asm_file="$1"
-    local task_start_time=0
+    local execution_start_time=0
     
     if [[ ! -f "$asm_file" ]]; then
         log_error "ASM file not found: $asm_file"
         return 1
     fi
     
-    log_info "Executing: bash $BASH_RUNNER $asm_file"
+    if [[ "$SILENT_MODE" == false ]]; then
+        log_info "Executing: bash $BASH_RUNNER $asm_file"
+    fi
     
-    # Record task start time
-    task_start_time=$(get_timestamp_ms)
+    # Record execution start time
+    execution_start_time=$(get_timestamp_ms)
     
     # Execute with bash command and wait for completion
-    if bash "$BASH_RUNNER" "$asm_file"; then
-        local task_end_time=$(get_timestamp_ms)
-        local task_duration=$((task_end_time - task_start_time))
-        log_info "Execution completed successfully (took $(format_duration $task_duration))"
+    if bash "$BASH_RUNNER" "$asm_file" >/dev/null 2>&1; then
+        local execution_end_time=$(get_timestamp_ms)
+        local execution_duration=$((execution_end_time - execution_start_time))
+        TOTAL_EXECUTION_TIME=$((TOTAL_EXECUTION_TIME + execution_duration))
+        
+        if [[ "$SILENT_MODE" == false ]]; then
+            log_info "Execution completed successfully ($(format_duration $execution_duration))"
+        fi
         return 0
     else
         local exit_code=$?
-        local task_end_time=$(get_timestamp_ms)
-        local task_duration=$((task_end_time - task_start_time))
-        log_error "Execution failed with exit code: $exit_code (took $(format_duration $task_duration))"
+        local execution_end_time=$(get_timestamp_ms)
+        local execution_duration=$((execution_end_time - execution_start_time))
+        TOTAL_EXECUTION_TIME=$((TOTAL_EXECUTION_TIME + execution_duration))
+        
+        if [[ "$SILENT_MODE" == false ]]; then
+            log_error "Execution failed with exit code: $exit_code ($(format_duration $execution_duration))"
+        fi
         return $exit_code
     fi
 }
@@ -150,7 +183,9 @@ execute_basm() {
 handle_js_content() {
     local content="$1"
     
-    log_info "Processing JS content: ${content:0:50}..."
+    if [[ "$SILENT_MODE" == false ]]; then
+        log_info "Processing JS content: ${content:0:50}..."
+    fi
     
     # Step 1: Check for declarations
     local declaration_type
@@ -158,7 +193,9 @@ handle_js_content() {
     
     if [[ -n "$declaration_type" ]]; then
         # Declaration detected
-        log_info "Processing declaration: $declaration_type"
+        if [[ "$SILENT_MODE" == false ]]; then
+            log_info "Processing declaration: $declaration_type"
+        fi
         
         # Create declaration file
         local decl_file="${JS_DIR}${declaration_type}"
@@ -209,7 +246,9 @@ handle_js_content() {
         local target_file="${dir_path}${file_name}"
         local asm_file="${target_file}.asm"
         
-        log_info "Checking for ASM file: $asm_file"
+        if [[ "$SILENT_MODE" == false ]]; then
+            log_info "Checking for ASM file: $asm_file"
+        fi
         
         if check_asm_exists "$asm_file"; then
             if create_temp_file "$target_file" "$content"; then
@@ -228,7 +267,10 @@ handle_js_content() {
     fi
     
     # Step 3: Fallback
-    log_warn "No specific handler found, using fallback"
+    if [[ "$SILENT_MODE" == false ]]; then
+        log_warn "No specific handler found, using fallback"
+    fi
+    
     local fallback_file="${JS_DIR}call"
     local fallback_asm="${fallback_file}.asm"
     
@@ -252,7 +294,9 @@ handle_js_content() {
 handle_chain_block() {
     local content="$1"
     
-    log_info "Processing chain block (length: ${#content})"
+    if [[ "$SILENT_MODE" == false ]]; then
+        log_info "Processing chain block (length: ${#content})"
+    fi
     
     local chain_file="${CHAIN_DIR}chain"
     local asm_file="${chain_file}.asm"
@@ -313,8 +357,10 @@ main() {
     # Record start time
     START_TIME=$(get_timestamp_ms)
     
-    log_info "Starting build process..."
-    log_info "Reading from: $ARCH_OUTPUT"
+    if [[ "$SILENT_MODE" == false ]]; then
+        log_info "Starting build process..."
+        log_info "Reading from: $ARCH_OUTPUT"
+    fi
     
     # Check if input file exists
     if [[ ! -f "$ARCH_OUTPUT" ]]; then
@@ -338,7 +384,9 @@ main() {
     local content_length=${#file_content}
     local pos=0
     
-    log_info "Processing ${content_length} characters of input"
+    if [[ "$SILENT_MODE" == false ]]; then
+        log_info "Processing ${content_length} characters of input"
+    fi
     
     # Process the file
     while [[ $pos -lt $content_length ]]; do
@@ -423,10 +471,12 @@ main() {
     # Print summary with execution time
     echo ""
     echo -e "${BLUE}========================================${NC}"
-    log_info "Build process completed"
-    log_info "Total execution time: $(format_duration $TOTAL_DURATION)"
-    log_info "Successfully processed: $processed_count"
-    log_info "Errors encountered: $error_count"
+    echo -e "${GREEN}[INFO]${NC} Build process completed"
+    echo -e "${GREEN}[INFO]${NC} Total execution time: $(format_duration $TOTAL_DURATION)"
+    echo -e "${GREEN}[INFO]${NC} File creation time: $(format_duration $TOTAL_CREATION_TIME)"
+    echo -e "${GREEN}[INFO]${NC} Script execution time: $(format_duration $TOTAL_EXECUTION_TIME)"
+    echo -e "${GREEN}[INFO]${NC} Successfully processed: $processed_count"
+    echo -e "${GREEN}[INFO]${NC} Errors encountered: $error_count"
     echo -e "${BLUE}========================================${NC}"
     
     if [[ $error_count -gt 0 ]]; then
@@ -436,69 +486,39 @@ main() {
     fi
 }
 
-# Alternative line-by-line processing for simpler cases
-process_file_simple() {
-    local in_chain=false
-    local chain_depth=0
-    local chain_content=""
-    local chain_start_line=0
-    
-    local line_number=0
-    
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        line_number=$((line_number + 1))
-        
-        if [[ $in_chain == true ]]; then
-            chain_content+="$line"$'\n'
-            
-            # Count chain-start tags in this line
-            while [[ "$line" =~ "<chain-start>" ]]; do
-                chain_depth=$((chain_depth + 1))
-                line="${line#*<chain-start>}"
-            done
-            
-            # Count chain-end tags in this line
-            while [[ "$line" =~ "<chain-end>" ]]; do
-                chain_depth=$((chain_depth - 1))
-                if [[ $chain_depth -eq 0 ]]; then
-                    # Found matching chain-end
-                    log_info "Found complete chain block (started at line $chain_start_line)"
-                    handle_chain_block "$chain_content"
-                    in_chain=false
-                    chain_content=""
-                    break
-                fi
-                line="${line#*<chain-end>}"
-            done
-            
-            continue
-        fi
-        
-        # Check for chain-start on its own line
-        if [[ "$line" =~ "<chain-start>" ]]; then
-            in_chain=true
-            chain_depth=1
-            chain_start_line=$line_number
-            chain_content="$line"$'\n'
-        # Check for single-line JS tags
-        elif [[ "$line" =~ "<js-start>" ]] && [[ "$line" =~ "<js-end>" ]]; then
-            local content="${line#*<js-start>}"
-            content="${content%<js-end>*}"
-            content=$(echo "$content" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-            
-            if [[ -n "$content" ]]; then
-                handle_js_content "$content"
-            fi
-        fi
-    done < "$ARCH_OUTPUT"
-    
-    if [[ $in_chain == true ]]; then
-        log_error "Unclosed chain block started at line $chain_start_line"
-        error_count=$((error_count + 1))
-    fi
+# Show usage information
+show_usage() {
+    echo "Usage: $0 [--silent]"
+    echo ""
+    echo "Options:"
+    echo "  --silent    Execute without verbose logging, only show final summary"
+    echo "  -h, --help  Show this help message"
+    echo ""
+    exit 0
+}
+
+# Parse command line arguments
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --silent)
+                SILENT_MODE=true
+                shift
+                ;;
+            -h|--help)
+                show_usage
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                show_usage
+                ;;
+        esac
+    done
 }
 
 # Start the main function
+parse_args "$@"
+
 if [[ -f "$ARCH_OUTPUT" ]]; then
     main
 else

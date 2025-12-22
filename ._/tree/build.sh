@@ -101,11 +101,14 @@ check_asm_exists() {
     
     # Check for .asm file
     if [[ -f "$asm_file" ]]; then
+        echo "asm"
         return 0
     # Check for binary (without .asm extension)
     elif [[ -f "${asm_file%.asm}" ]]; then
+        echo "binary"
         return 0
     else
+        echo ""
         return 1
     fi
 }
@@ -143,20 +146,11 @@ create_temp_file() {
     fi
 }
 
-# Function to execute basm.sh and wait for completion
+# Function to execute basm.sh for .asm files
 execute_basm() {
     local input_file="$1"
+    local asm_file="$2"
     local execution_start_time=0
-    
-    # The .asm or binary file has the same base name but without _input
-    local asm_file="${input_file%_input}.asm"
-    local binary_file="${input_file%_input}"
-    
-    # Check if either .asm file or binary exists
-    if [[ ! -f "$asm_file" ]] && [[ ! -f "$binary_file" ]]; then
-        log_error "ASM file or binary not found: $asm_file or $binary_file"
-        return 1
-    fi
     
     if [[ "$SILENT_MODE" == false ]]; then
         log_info "Executing: bash $BASH_RUNNER $asm_file"
@@ -188,6 +182,45 @@ execute_basm() {
     fi
 }
 
+# Function to execute binary files directly
+execute_binary() {
+    local input_file="$1"
+    local binary_file="$2"
+    local execution_start_time=0
+    
+    # Make sure binary is executable
+    chmod +x "$binary_file" 2>/dev/null || true
+    
+    if [[ "$SILENT_MODE" == false ]]; then
+        log_info "Executing binary directly: $binary_file"
+    fi
+    
+    # Record execution start time
+    execution_start_time=$(get_timestamp_ms)
+    
+    # Execute binary directly and wait for completion
+    if "$binary_file" >/dev/null 2>&1; then
+        local execution_end_time=$(get_timestamp_ms)
+        local execution_duration=$((execution_end_time - execution_start_time))
+        TOTAL_EXECUTION_TIME=$((TOTAL_EXECUTION_TIME + execution_duration))
+        
+        if [[ "$SILENT_MODE" == false ]]; then
+            log_info "Binary execution completed successfully ($(format_duration $execution_duration))"
+        fi
+        return 0
+    else
+        local exit_code=$?
+        local execution_end_time=$(get_timestamp_ms)
+        local execution_duration=$((execution_end_time - execution_start_time))
+        TOTAL_EXECUTION_TIME=$((TOTAL_EXECUTION_TIME + execution_duration))
+        
+        if [[ "$SILENT_MODE" == false ]]; then
+            log_error "Binary execution failed with exit code: $exit_code ($(format_duration $execution_duration))"
+        fi
+        return $exit_code
+    fi
+}
+
 # Function to handle JavaScript-like content
 handle_js_content() {
     local content="$1"
@@ -212,11 +245,23 @@ handle_js_content() {
         local binary_file="${JS_DIR}${declaration_type}"
         
         if create_temp_file "$input_file" "$content"; then
-            if check_asm_exists "$asm_file"; then
-                if execute_basm "$input_file"; then
-                    processed_count=$((processed_count + 1))
-                else
-                    error_count=$((error_count + 1))
+            local file_type
+            file_type=$(check_asm_exists "$asm_file")
+            if [[ -n "$file_type" ]]; then
+                if [[ "$file_type" == "asm" ]]; then
+                    # Execute .asm file with basm.sh
+                    if execute_basm "$input_file" "$asm_file"; then
+                        processed_count=$((processed_count + 1))
+                    else
+                        error_count=$((error_count + 1))
+                    fi
+                elif [[ "$file_type" == "binary" ]]; then
+                    # Execute binary directly
+                    if execute_binary "$input_file" "$binary_file"; then
+                        processed_count=$((processed_count + 1))
+                    else
+                        error_count=$((error_count + 1))
+                    fi
                 fi
             else
                 log_error "ASM file or binary not found: $asm_file or $binary_file"
@@ -262,14 +307,28 @@ handle_js_content() {
             log_info "Checking for ASM file or binary: $asm_file or $binary_file"
         fi
         
-        if check_asm_exists "$asm_file"; then
+        local file_type
+        file_type=$(check_asm_exists "$asm_file")
+        if [[ -n "$file_type" ]]; then
             if create_temp_file "$input_file" "$content"; then
-                if execute_basm "$input_file"; then
-                    processed_count=$((processed_count + 1))
-                    return
-                else
-                    error_count=$((error_count + 1))
-                    return
+                if [[ "$file_type" == "asm" ]]; then
+                    # Execute .asm file with basm.sh
+                    if execute_basm "$input_file" "$asm_file"; then
+                        processed_count=$((processed_count + 1))
+                        return
+                    else
+                        error_count=$((error_count + 1))
+                        return
+                    fi
+                elif [[ "$file_type" == "binary" ]]; then
+                    # Execute binary directly
+                    if execute_binary "$input_file" "$binary_file"; then
+                        processed_count=$((processed_count + 1))
+                        return
+                    else
+                        error_count=$((error_count + 1))
+                        return
+                    fi
                 fi
             else
                 error_count=$((error_count + 1))
@@ -289,11 +348,23 @@ handle_js_content() {
     local binary_file="${JS_DIR}call"
     
     if create_temp_file "$input_file" "$content"; then
-        if check_asm_exists "$asm_file"; then
-            if execute_basm "$input_file"; then
-                processed_count=$((processed_count + 1))
-            else
-                error_count=$((error_count + 1))
+        local file_type
+        file_type=$(check_asm_exists "$asm_file")
+        if [[ -n "$file_type" ]]; then
+            if [[ "$file_type" == "asm" ]]; then
+                # Execute .asm file with basm.sh
+                if execute_basm "$input_file" "$asm_file"; then
+                    processed_count=$((processed_count + 1))
+                else
+                    error_count=$((error_count + 1))
+                fi
+            elif [[ "$file_type" == "binary" ]]; then
+                # Execute binary directly
+                if execute_binary "$input_file" "$binary_file"; then
+                    processed_count=$((processed_count + 1))
+                else
+                    error_count=$((error_count + 1))
+                fi
             fi
         else
             log_error "Fallback ASM file or binary not found: $asm_file or $binary_file"
@@ -318,11 +389,23 @@ handle_chain_block() {
     local binary_file="${CHAIN_DIR}chain"
     
     if create_temp_file "$input_file" "$content"; then
-        if check_asm_exists "$asm_file"; then
-            if execute_basm "$input_file"; then
-                processed_count=$((processed_count + 1))
-            else
-                error_count=$((error_count + 1))
+        local file_type
+        file_type=$(check_asm_exists "$asm_file")
+        if [[ -n "$file_type" ]]; then
+            if [[ "$file_type" == "asm" ]]; then
+                # Execute .asm file with basm.sh
+                if execute_basm "$input_file" "$asm_file"; then
+                    processed_count=$((processed_count + 1))
+                else
+                    error_count=$((error_count + 1))
+                fi
+            elif [[ "$file_type" == "binary" ]]; then
+                # Execute binary directly
+                if execute_binary "$input_file" "$binary_file"; then
+                    processed_count=$((processed_count + 1))
+                else
+                    error_count=$((error_count + 1))
+                fi
             fi
         else
             log_error "Chain ASM file or binary not found: $asm_file or $binary_file"

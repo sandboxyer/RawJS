@@ -35,7 +35,7 @@ esac
 echo -e "${GREEN}Detected architecture: ${ARCH} (using ${FORMAT} format)${NC}"
 
 # Set up NASM binary path
-NASM_BINARY="./._/nasm/${ARCH}-linux/nasm-${ARCH}-linux"
+NASM_BINARY="./._/basm/${ARCH}-linux/nasm-${ARCH}-linux"
 
 # Check if NASM binary exists
 if [ ! -f "$NASM_BINARY" ]; then

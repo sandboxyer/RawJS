@@ -95,11 +95,15 @@ parse_method_name() {
     echo "$method_part"
 }
 
-# Function to check if .asm file exists
+# Function to check if .asm file exists OR binary exists
 check_asm_exists() {
     local asm_file="$1"
     
+    # Check for .asm file
     if [[ -f "$asm_file" ]]; then
+        return 0
+    # Check for binary (without .asm extension)
+    elif [[ -f "${asm_file%.asm}" ]]; then
         return 0
     else
         return 1
@@ -141,11 +145,16 @@ create_temp_file() {
 
 # Function to execute basm.sh and wait for completion
 execute_basm() {
-    local asm_file="$1"
+    local input_file="$1"
     local execution_start_time=0
     
-    if [[ ! -f "$asm_file" ]]; then
-        log_error "ASM file not found: $asm_file"
+    # The .asm or binary file has the same base name but without _input
+    local asm_file="${input_file%_input}.asm"
+    local binary_file="${input_file%_input}"
+    
+    # Check if either .asm file or binary exists
+    if [[ ! -f "$asm_file" ]] && [[ ! -f "$binary_file" ]]; then
+        log_error "ASM file or binary not found: $asm_file or $binary_file"
         return 1
     fi
     
@@ -197,19 +206,20 @@ handle_js_content() {
             log_info "Processing declaration: $declaration_type"
         fi
         
-        # Create declaration file
-        local decl_file="${JS_DIR}${declaration_type}"
-        local asm_file="${decl_file}.asm"
+        # Create declaration file with _input suffix
+        local input_file="${JS_DIR}${declaration_type}_input"
+        local asm_file="${JS_DIR}${declaration_type}.asm"
+        local binary_file="${JS_DIR}${declaration_type}"
         
-        if create_temp_file "$decl_file" "$content"; then
+        if create_temp_file "$input_file" "$content"; then
             if check_asm_exists "$asm_file"; then
-                if execute_basm "$asm_file"; then
+                if execute_basm "$input_file"; then
                     processed_count=$((processed_count + 1))
                 else
                     error_count=$((error_count + 1))
                 fi
             else
-                log_error "ASM file not found: $asm_file"
+                log_error "ASM file or binary not found: $asm_file or $binary_file"
                 error_count=$((error_count + 1))
             fi
         else
@@ -243,16 +253,18 @@ handle_js_content() {
             file_name="${parts[-1]}"
         fi
         
-        local target_file="${dir_path}${file_name}"
-        local asm_file="${target_file}.asm"
+        # Create input file with _input suffix
+        local input_file="${dir_path}${file_name}_input"
+        local asm_file="${dir_path}${file_name}.asm"
+        local binary_file="${dir_path}${file_name}"
         
         if [[ "$SILENT_MODE" == false ]]; then
-            log_info "Checking for ASM file: $asm_file"
+            log_info "Checking for ASM file or binary: $asm_file or $binary_file"
         fi
         
         if check_asm_exists "$asm_file"; then
-            if create_temp_file "$target_file" "$content"; then
-                if execute_basm "$asm_file"; then
+            if create_temp_file "$input_file" "$content"; then
+                if execute_basm "$input_file"; then
                     processed_count=$((processed_count + 1))
                     return
                 else
@@ -271,18 +283,20 @@ handle_js_content() {
         log_warn "No specific handler found, using fallback"
     fi
     
-    local fallback_file="${JS_DIR}call"
-    local fallback_asm="${fallback_file}.asm"
+    # Create fallback input file with _input suffix
+    local input_file="${JS_DIR}call_input"
+    local asm_file="${JS_DIR}call.asm"
+    local binary_file="${JS_DIR}call"
     
-    if create_temp_file "$fallback_file" "$content"; then
-        if check_asm_exists "$fallback_asm"; then
-            if execute_basm "$fallback_asm"; then
+    if create_temp_file "$input_file" "$content"; then
+        if check_asm_exists "$asm_file"; then
+            if execute_basm "$input_file"; then
                 processed_count=$((processed_count + 1))
             else
                 error_count=$((error_count + 1))
             fi
         else
-            log_error "Fallback ASM file not found: $fallback_asm"
+            log_error "Fallback ASM file or binary not found: $asm_file or $binary_file"
             error_count=$((error_count + 1))
         fi
     else
@@ -298,18 +312,20 @@ handle_chain_block() {
         log_info "Processing chain block (length: ${#content})"
     fi
     
-    local chain_file="${CHAIN_DIR}chain"
-    local asm_file="${chain_file}.asm"
+    # Create chain input file with _input suffix
+    local input_file="${CHAIN_DIR}chain_input"
+    local asm_file="${CHAIN_DIR}chain.asm"
+    local binary_file="${CHAIN_DIR}chain"
     
-    if create_temp_file "$chain_file" "$content"; then
+    if create_temp_file "$input_file" "$content"; then
         if check_asm_exists "$asm_file"; then
-            if execute_basm "$asm_file"; then
+            if execute_basm "$input_file"; then
                 processed_count=$((processed_count + 1))
             else
                 error_count=$((error_count + 1))
             fi
         else
-            log_error "Chain ASM file not found: $asm_file"
+            log_error "Chain ASM file or binary not found: $asm_file or $binary_file"
             error_count=$((error_count + 1))
         fi
     else

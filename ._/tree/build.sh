@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # build.sh - Processes ../arch_output file with tag-based content execution
+# Added execution time tracking
 
 # Set strict mode for better error handling
 set -euo pipefail
@@ -15,11 +16,33 @@ CHAIN_DIR="chain/"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Initialize counters
 processed_count=0
 error_count=0
+
+# Start time tracking (global variable)
+START_TIME=0
+
+# Function to get current timestamp in milliseconds
+get_timestamp_ms() {
+    echo $(($(date +%s%N)/1000000))
+}
+
+# Function to format milliseconds to human readable time
+format_duration() {
+    local ms=$1
+    local seconds=$((ms / 1000))
+    local milliseconds=$((ms % 1000))
+    
+    if (( seconds > 0 )); then
+        echo "${seconds}.${milliseconds}s"
+    else
+        echo "${milliseconds}ms"
+    fi
+}
 
 # Function to log messages
 log_info() {
@@ -96,6 +119,7 @@ create_temp_file() {
 # Function to execute basm.sh and wait for completion
 execute_basm() {
     local asm_file="$1"
+    local task_start_time=0
     
     if [[ ! -f "$asm_file" ]]; then
         log_error "ASM file not found: $asm_file"
@@ -104,13 +128,20 @@ execute_basm() {
     
     log_info "Executing: bash $BASH_RUNNER $asm_file"
     
+    # Record task start time
+    task_start_time=$(get_timestamp_ms)
+    
     # Execute with bash command and wait for completion
     if bash "$BASH_RUNNER" "$asm_file"; then
-        log_info "Execution completed successfully"
+        local task_end_time=$(get_timestamp_ms)
+        local task_duration=$((task_end_time - task_start_time))
+        log_info "Execution completed successfully (took $(format_duration $task_duration))"
         return 0
     else
         local exit_code=$?
-        log_error "Execution failed with exit code: $exit_code"
+        local task_end_time=$(get_timestamp_ms)
+        local task_duration=$((task_end_time - task_start_time))
+        log_error "Execution failed with exit code: $exit_code (took $(format_duration $task_duration))"
         return $exit_code
     fi
 }
@@ -279,6 +310,9 @@ extract_chain_block() {
 
 # Main function to process the arch_output file
 main() {
+    # Record start time
+    START_TIME=$(get_timestamp_ms)
+    
     log_info "Starting build process..."
     log_info "Reading from: $ARCH_OUTPUT"
     
@@ -382,11 +416,18 @@ main() {
         fi
     done
     
-    # Print summary
+    # Calculate total execution time
+    local END_TIME=$(get_timestamp_ms)
+    local TOTAL_DURATION=$((END_TIME - START_TIME))
+    
+    # Print summary with execution time
     echo ""
+    echo -e "${BLUE}========================================${NC}"
     log_info "Build process completed"
+    log_info "Total execution time: $(format_duration $TOTAL_DURATION)"
     log_info "Successfully processed: $processed_count"
     log_info "Errors encountered: $error_count"
+    echo -e "${BLUE}========================================${NC}"
     
     if [[ $error_count -gt 0 ]]; then
         exit 1
@@ -457,7 +498,7 @@ process_file_simple() {
     fi
 }
 
-# Try the main function
+# Start the main function
 if [[ -f "$ARCH_OUTPUT" ]]; then
     main
 else

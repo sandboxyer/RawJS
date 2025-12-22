@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # Raw.sh - Compile and link all .asm files using NASM and LD
+# and copy all .sh files to /dev directory
 
 # Colors for output
 RED='\033[0;31m'
@@ -10,6 +11,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}Starting compilation and linking of .asm files...${NC}"
+echo -e "${BLUE}Also copying .sh files to /dev directory...${NC}"
 
 # Determine current architecture
 ARCH=""
@@ -69,79 +71,137 @@ done
 # Find all .asm files
 echo -e "${BLUE}Finding .asm files...${NC}"
 ASM_FILES=$(find "./._" -name "*.asm" ! -path "./._/nasm/*" 2>/dev/null)
-COUNT=$(echo "$ASM_FILES" | wc -l)
+ASM_COUNT=$(echo "$ASM_FILES" | wc -l)
 
-if [ "$COUNT" -eq 0 ]; then
-    echo -e "${RED}No .asm files found!${NC}"
+# Find all .sh files
+echo -e "${BLUE}Finding .sh files...${NC}"
+SH_FILES=$(find "./._" -name "*.sh" ! -path "./._/nasm/*" 2>/dev/null)
+SH_COUNT=$(echo "$SH_FILES" | wc -l)
+
+if [ "$ASM_COUNT" -eq 0 ] && [ "$SH_COUNT" -eq 0 ]; then
+    echo -e "${RED}No .asm or .sh files found!${NC}"
     exit 1
 fi
 
-echo -e "${YELLOW}Found $COUNT .asm files to process${NC}"
+echo -e "${YELLOW}Found $ASM_COUNT .asm files and $SH_COUNT .sh files to process${NC}"
 
 # Now compile and link all .asm files
-echo -e "${BLUE}\nCompiling and linking .asm files...${NC}"
+if [ "$ASM_COUNT" -gt 0 ]; then
+    echo -e "${BLUE}\nCompiling and linking .asm files...${NC}"
+fi
 
 # Initialize counters
-total_files=0
+total_asm_files=0
 compiled_files=0
 failed_files=0
 
-# Use process substitution to avoid pipe issues with variable scope
-while IFS= read -r asm_file; do
-    ((total_files++))
-    
-    echo -e "\n${YELLOW}[${total_files}] Processing: ${asm_file}${NC}"
-    
-    # Generate output paths
-    output_file="${asm_file/.\/._/.\/dev}"
-    output_file="${output_file%.asm}"  # Remove .asm extension
-    object_file="${output_file}.o"
-    
-    # Ensure output directory exists
-    mkdir -p "$(dirname "$output_file")" 2>/dev/null || true
-    
-    # Step 1: Compile with NASM
-    echo -e "  Compiling: $NASM_BINARY -f ${FORMAT} \"${asm_file}\" -o \"${object_file}\""
-    "$NASM_BINARY" -f "$FORMAT" "$asm_file" -o "$object_file"
-    NASM_EXIT=$?
-    
-    if [ $NASM_EXIT -eq 0 ]; then
-        echo -e "  ${GREEN}✓ Compilation successful${NC}"
-    else
-        echo -e "${RED}  ✗ Compilation failed for: ${asm_file}${NC}"
+# Process .asm files
+if [ "$ASM_COUNT" -gt 0 ]; then
+    while IFS= read -r asm_file; do
+        ((total_asm_files++))
+        
+        echo -e "\n${YELLOW}[${total_asm_files}] Processing ASM: ${asm_file}${NC}"
+        
+        # Generate output paths
+        output_file="${asm_file/.\/._/.\/dev}"
+        output_file="${output_file%.asm}"  # Remove .asm extension
+        object_file="${output_file}.o"
+        
+        # Ensure output directory exists
+        mkdir -p "$(dirname "$output_file")" 2>/dev/null || true
+        
+        # Step 1: Compile with NASM
+        echo -e "  Compiling: $NASM_BINARY -f ${FORMAT} \"${asm_file}\" -o \"${object_file}\""
+        "$NASM_BINARY" -f "$FORMAT" "$asm_file" -o "$object_file"
+        NASM_EXIT=$?
+        
+        if [ $NASM_EXIT -eq 0 ]; then
+            echo -e "  ${GREEN}✓ Compilation successful${NC}"
+        else
+            echo -e "${RED}  ✗ Compilation failed for: ${asm_file}${NC}"
+            rm -f "$object_file" 2>/dev/null || true
+            ((failed_files++))
+            continue
+        fi
+        
+        # Step 2: Link with LD
+        echo -e "  Linking: ld \"${object_file}\" -o \"${output_file}\""
+        ld "$object_file" -o "$output_file" 2>&1
+        LD_EXIT=$?
+        
+        if [ $LD_EXIT -eq 0 ]; then
+            echo -e "  ${GREEN}✓ Linking successful${NC}"
+            chmod +x "$output_file" 2>/dev/null || true
+            ((compiled_files++))
+        else
+            echo -e "${RED}  ✗ Linking failed for: ${asm_file}${NC}"
+            ((failed_files++))
+        fi
+        
+        # Step 3: Clean up object file
         rm -f "$object_file" 2>/dev/null || true
-        ((failed_files++))
-        continue
-    fi
+        echo -e "  ${BLUE}✓ Cleaned up object file${NC}"
+        
+    done < <(echo "$ASM_FILES")
+fi
+
+# Now copy all .sh files
+if [ "$SH_COUNT" -gt 0 ]; then
+    echo -e "\n${BLUE}Copying .sh files to /dev directory...${NC}"
     
-    # Step 2: Link with LD
-    echo -e "  Linking: ld \"${object_file}\" -o \"${output_file}\""
-    ld "$object_file" -o "$output_file" 2>&1
-    LD_EXIT=$?
+    total_sh_files=0
+    copied_sh_files=0
+    failed_sh_files=0
     
-    if [ $LD_EXIT -eq 0 ]; then
-        echo -e "  ${GREEN}✓ Linking successful${NC}"
-        chmod +x "$output_file" 2>/dev/null || true
-        ((compiled_files++))
-    else
-        echo -e "${RED}  ✗ Linking failed for: ${asm_file}${NC}"
-        ((failed_files++))
-    fi
-    
-    # Step 3: Clean up object file
-    rm -f "$object_file" 2>/dev/null || true
-    echo -e "  ${BLUE}✓ Cleaned up object file${NC}"
-    
-done < <(echo "$ASM_FILES")
+    while IFS= read -r sh_file; do
+        ((total_sh_files++))
+        
+        echo -e "${YELLOW}[${total_sh_files}] Copying SH: ${sh_file}${NC}"
+        
+        # Generate output path
+        output_file="${sh_file/.\/._/.\/dev}"
+        
+        # Ensure output directory exists
+        mkdir -p "$(dirname "$output_file")" 2>/dev/null || true
+        
+        # Copy the .sh file
+        echo -e "  Copying: cp \"${sh_file}\" \"${output_file}\""
+        cp "$sh_file" "$output_file"
+        COPY_EXIT=$?
+        
+        if [ $COPY_EXIT -eq 0 ]; then
+            # Make it executable
+            chmod +x "$output_file" 2>/dev/null || true
+            echo -e "  ${GREEN}✓ Copy successful${NC}"
+            ((copied_sh_files++))
+        else
+            echo -e "${RED}  ✗ Copy failed for: ${sh_file}${NC}"
+            ((failed_sh_files++))
+        fi
+        
+    done < <(echo "$SH_FILES")
+fi
 
 # Summary
 echo -e "\n${BLUE}=== Compilation Summary ===${NC}"
-echo -e "${GREEN}Successfully compiled and linked: ${compiled_files} files${NC}"
-if [ $failed_files -gt 0 ]; then
-    echo -e "${RED}Failed: ${failed_files} files${NC}"
+if [ "$ASM_COUNT" -gt 0 ]; then
+    echo -e "${GREEN}Successfully compiled and linked: ${compiled_files} .asm files${NC}"
+    if [ $failed_files -gt 0 ]; then
+        echo -e "${RED}Failed: ${failed_files} .asm files${NC}"
+    fi
+    echo -e "Total .asm files processed: ${total_asm_files}"
 fi
-echo -e "Total .asm files processed: ${total_files}"
-echo -e "${GREEN}Output directory: ./dev${NC}"
+
+if [ "$SH_COUNT" -gt 0 ]; then
+    echo -e "\n${BLUE}=== Copy Summary ===${NC}"
+    echo -e "${GREEN}Successfully copied: ${copied_sh_files} .sh files${NC}"
+    if [ $failed_sh_files -gt 0 ]; then
+        echo -e "${RED}Failed: ${failed_sh_files} .sh files${NC}"
+    fi
+    echo -e "Total .sh files processed: ${SH_COUNT}"
+fi
+
+echo -e "\n${GREEN}Output directory: ./dev${NC}"
 
 # Display what's in /dev with tree-like structure
 echo -e "\n${BLUE}=== /dev Directory Structure ===${NC}"
@@ -182,14 +242,21 @@ done
 
 # Verify all files were created
 echo -e "\n${BLUE}=== Verification ===${NC}"
-echo -e "Expected files: $COUNT"
-echo -e "Created files: $(find "./dev" -type f 2>/dev/null | wc -l)"
+if [ "$ASM_COUNT" -gt 0 ]; then
+    echo -e "Expected .asm files: $ASM_COUNT"
+fi
+if [ "$SH_COUNT" -gt 0 ]; then
+    echo -e "Expected .sh files: $SH_COUNT"
+fi
+echo -e "Total files created: $(find "./dev" -type f 2>/dev/null | wc -l)"
 
-if [ "$COUNT" -eq "$(find "./dev" -type f 2>/dev/null | wc -l)" ]; then
+expected_total=$((ASM_COUNT + SH_COUNT))
+actual_total=$(find "./dev" -type f 2>/dev/null | wc -l)
+if [ "$expected_total" -eq "$actual_total" ]; then
     echo -e "${GREEN}✓ All files were successfully created!${NC}"
 else
-    echo -e "${YELLOW}⚠ Some files might be missing${NC}"
+    echo -e "${YELLOW}⚠ Some files might be missing (expected: $expected_total, got: $actual_total)${NC}"
 fi
 
 echo -e "\n${GREEN}Build completed successfully!${NC}"
-echo -e "All binaries are available in the ./dev directory"
+echo -e "All binaries and shell scripts are available in the ./dev directory"

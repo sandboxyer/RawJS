@@ -1,37 +1,37 @@
 #!/bin/bash
 
 # log.sh - Parses console.log() statements and converts them to assembly code
-# Usage: ./log.sh (run from directory containing log_input file)
+# Enhanced version with support for all basic types
 
-# Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Target assembly file
 OUTPUT_FILE="../../../build_output.asm"
 
-# Check if log_input file exists
 if [ ! -f "log_input" ]; then
     echo "Error: log_input file not found in $(pwd)"
     exit 1
 fi
 
-# Read the console.log statement
 LOG_STATEMENT=$(cat log_input | tr -d '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
 # Extract the content inside console.log()
-# Remove "console.log(" from start and ");" from end
 CONTENT="${LOG_STATEMENT#console.log(}"
 CONTENT="${CONTENT%);}"
 
-# Generate a unique label for this log statement
+# Generate a unique label
 LOG_LABEL="log_$(date +%s%N | md5sum | cut -c1-8)"
 
-# Function to convert escape sequences to NASM format
+# Function to escape strings for NASM
 escape_for_nasm() {
     local str="$1"
     
-    # Convert escape sequences to their character values
+    # If empty string, return 0
+    if [ -z "$str" ]; then
+        echo "0"
+        return
+    fi
+    
     local result=""
     local i=0
     local len=${#str}
@@ -52,7 +52,6 @@ escape_for_nasm() {
             esac
             i=$((i+2))
         else
-            # Escape single quotes for NASM
             if [ "$char" = "'" ]; then
                 result="${result}''"
             else
@@ -62,20 +61,15 @@ escape_for_nasm() {
         fi
     done
     
-    # Clean up the result - handle edge cases
-    if [ -z "$result" ]; then
-        echo "0"
-    elif [[ "$result" == "', "* ]] && [[ "$result" == *", '" ]]; then
-        # Result starts and ends with quote-comma pattern
+    # Clean up
+    if [[ "$result" == "', "* ]] && [[ "$result" == *", '" ]]; then
         result="${result:3}"
         result="${result%\", \"}"
         echo "'${result}', 0"
     elif [[ "$result" == "', "* ]]; then
-        # Result starts with quote-comma pattern
         result="${result:3}"
         echo "'${result}', 0"
     elif [[ "$result" == *", '" ]]; then
-        # Result ends with comma-quote pattern
         result="${result%\", \"}"
         echo "'${result}', 0"
     else
@@ -83,107 +77,194 @@ escape_for_nasm() {
     fi
 }
 
-# Function to generate NASM string from content
-generate_nasm_string() {
-    local content="$1"
-    
-    # Remove surrounding quotes if present
-    if [[ "$content" =~ ^\'.*\'$ ]]; then
-        content="${content:1:${#content}-2}"
-    elif [[ "$content" =~ ^\".*\"$ ]]; then
-        content="${content:1:${#content}-2}"
-    elif [[ "$content" =~ ^\`.*\`$ ]]; then
-        content="${content:1:${#content}-2}"
+# Function to check if a string is a number (integer or float)
+is_number() {
+    local str="$1"
+    # Check for integer or float (including negative numbers)
+    if [[ "$str" =~ ^-?[0-9]+$ ]] || [[ "$str" =~ ^-?[0-9]*\.?[0-9]+$ ]]; then
+        return 0
+    else
+        return 1
     fi
+}
+
+# Function to generate string constants
+generate_string_constants() {
+    local args="$1"
     
-    # If content is empty, just return null terminator
-    if [ -z "$content" ]; then
-        echo "0"
+    if [ -z "$args" ]; then
         return
     fi
     
-    # Escape for NASM
-    local nasm_string=$(escape_for_nasm "$content")
-    echo "$nasm_string"
+    # Parse arguments
+    IFS=',' read -ra ARGS <<< "$args"
+    
+    for i in "${!ARGS[@]}"; do
+        local arg=$(echo "${ARGS[$i]}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        
+        # Check what type of argument this is
+        case "$arg" in
+            # Boolean values
+            "true")
+                echo "    ${LOG_LABEL}_bool${i} db 'true', 0"
+                ;;
+            "false")
+                echo "    ${LOG_LABEL}_bool${i} db 'false', 0"
+                ;;
+            # Null
+            "null")
+                echo "    ${LOG_LABEL}_null${i} db 'null', 0"
+                ;;
+            # Undefined
+            "undefined")
+                echo "    ${LOG_LABEL}_undef${i} db 'undefined', 0"
+                ;;
+            # String literals
+            \'*\' | \"*\" | \`*\`)
+                # Remove surrounding quotes for processing
+                local stripped="${arg:1:${#arg}-2}"
+                local nasm_string=$(escape_for_nasm "$stripped")
+                echo "    ${LOG_LABEL}_str${i} db $nasm_string"
+                ;;
+            # Numbers (integers and floats)
+            *)
+                if is_number "$arg"; then
+                    # For integers, we don't need a string constant
+                    # For floats, we need to create a string representation
+                    if [[ "$arg" =~ \. ]]; then
+                        echo "    ${LOG_LABEL}_float${i} db '$arg', 0"
+                    fi
+                else
+                    # Assume it's a variable or expression
+                    # Check if it's a simple variable name
+                    if [[ "$arg" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+                        # It's a variable, no string constant needed
+                        :
+                    else
+                        # It's an expression, evaluate it
+                        local result=$(echo "$arg" | bc 2>/dev/null || echo "0")
+                        if [[ "$result" =~ \. ]]; then
+                            echo "    ${LOG_LABEL}_expr${i} db '$result', 0"
+                        fi
+                    fi
+                fi
+                ;;
+        esac
+    done
 }
 
-# Function to parse and generate assembly for a single argument
+# Function to generate assembly code for a single argument
 generate_assembly_for_arg() {
     local arg="$1"
     local arg_index="$2"
     local trimmed_arg=$(echo "$arg" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     
-    # Check if it's a string (single quotes, double quotes, or backticks)
-    if [[ "$trimmed_arg" =~ ^\'.*\'$ ]] || [[ "$trimmed_arg" =~ ^\".*\"$ ]] || [[ "$trimmed_arg" =~ ^\`.*\`$ ]]; then
-        # It's a string literal
-        echo "    mov rsi, ${LOG_LABEL}_str${arg_index}"
-        echo "    call print_str"
-        
-    # Check if it's a template literal with ${}
-    elif [[ "$trimmed_arg" =~ ^\`.*\$\{.*\}.*\`$ ]]; then
-        # Template literal - we'll handle simple cases only
-        echo "    mov rsi, ${LOG_LABEL}_tmpl${arg_index}"
-        echo "    call print_str"
-        
-    # Check if it's a mathematical expression (contains +, -, *, /)
-    elif [[ "$trimmed_arg" =~ [+*/-] ]] && [[ ! "$trimmed_arg" =~ ['"\`'] ]]; then
-        # Mathematical expression - evaluate it
-        local result=$(echo "$trimmed_arg" | bc 2>/dev/null || echo "0")
-        echo "    mov rax, $result"
-        echo "    call print_num"
-        
-    else
-        # Assume it's a variable name
-        local var_name=$(echo "$trimmed_arg" | sed "s/^['\"]//;s/['\"]\$//")
-        
-        # Check if it's actually a string literal that wasn't caught above
-        if [[ "$var_name" == "$trimmed_arg" ]] && [[ ! "$var_name" =~ ^[0-9]+$ ]]; then
-            # It's a variable reference
-            echo "    mov rax, [$var_name]"
-            echo "    call print_num"
-        else
-            # It's probably a number or simple value
-            echo "    mov rax, $var_name"
-            echo "    call print_num"
-        fi
-    fi
+    case "$trimmed_arg" in
+        # Boolean values
+        "true")
+            echo "    mov rsi, ${LOG_LABEL}_bool${arg_index}"
+            echo "    call print_str"
+            ;;
+        "false")
+            echo "    mov rsi, ${LOG_LABEL}_bool${arg_index}"
+            echo "    call print_str"
+            ;;
+        # Null
+        "null")
+            echo "    mov rsi, ${LOG_LABEL}_null${arg_index}"
+            echo "    call print_str"
+            ;;
+        # Undefined
+        "undefined")
+            echo "    mov rsi, ${LOG_LABEL}_undef${arg_index}"
+            echo "    call print_str"
+            ;;
+        # String literals
+        \'*\' | \"*\" | \`*\`)
+            echo "    mov rsi, ${LOG_LABEL}_str${arg_index}"
+            echo "    call print_str"
+            ;;
+        # Numbers
+        *)
+            if is_number "$trimmed_arg"; then
+                # Check if it's a float
+                if [[ "$trimmed_arg" =~ \. ]]; then
+                    # Float - print as string
+                    echo "    mov rsi, ${LOG_LABEL}_float${arg_index}"
+                    echo "    call print_str"
+                else
+                    # Integer - print as number
+                    echo "    mov rax, $trimmed_arg"
+                    echo "    call print_num"
+                fi
+            else
+                # Check if it's a mathematical expression
+                if [[ "$trimmed_arg" =~ [+*/-] ]] && [[ ! "$trimmed_arg" =~ ['"\`'] ]]; then
+                    # Evaluate the expression
+                    local result=$(echo "$trimmed_arg" | bc 2>/dev/null || echo "0")
+                    # Check if result is float
+                    if [[ "$result" =~ \. ]]; then
+                        echo "    mov rsi, ${LOG_LABEL}_expr${arg_index}"
+                        echo "    call print_str"
+                    else
+                        echo "    mov rax, $result"
+                        echo "    call print_num"
+                    fi
+                else
+                    # Assume it's a variable
+                    # Remove any surrounding quotes that might have been missed
+                    local var_name=$(echo "$trimmed_arg" | sed "s/^['\"]//;s/['\"]\$//")
+                    
+                    # Check if it's a valid variable name
+                    if [[ "$var_name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+                        echo "    mov rax, [$var_name]"
+                        echo "    call print_num"
+                    else
+                        # If not a valid variable name, try to treat as number
+                        if [[ "$var_name" =~ ^[0-9]+$ ]]; then
+                            echo "    mov rax, $var_name"
+                            echo "    call print_num"
+                        else
+                            # Default to 0
+                            echo "    mov rax, 0"
+                            echo "    call print_num"
+                        fi
+                    fi
+                fi
+            fi
+            ;;
+    esac
 }
 
-# Function to generate string constants for arguments
-generate_string_constants() {
+# Function to generate the console.log assembly code
+generate_console_log_code() {
+    echo "; === Generated console.log ==="
+    
+    if [ -z "$CONTENT" ]; then
+        # Empty console.log()
+        echo "; Empty console.log"
+        generate_newline
+        return
+    fi
+    
+    # Check if there are multiple arguments
     if [[ "$CONTENT" == *","* ]]; then
         # Multiple arguments
         IFS=',' read -ra ARGS <<< "$CONTENT"
         
         for i in "${!ARGS[@]}"; do
-            local trimmed_arg=$(echo "${ARGS[$i]}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            
-            # Only generate constants for string literals
-            if [[ "$trimmed_arg" =~ ^\'.*\'$ ]] || [[ "$trimmed_arg" =~ ^\".*\"$ ]] || [[ "$trimmed_arg" =~ ^\`.*\`$ ]]; then
-                local nasm_string=$(generate_nasm_string "$trimmed_arg")
-                echo "    ${LOG_LABEL}_str$i db $nasm_string"
-            elif [[ "$trimmed_arg" =~ ^\`.*\$\{.*\}.*\`$ ]]; then
-                local string_content="${trimmed_arg:1:${#trimmed_arg}-2}"
-                string_content=$(echo "$string_content" | sed 's/\${[^}]*}//g')
-                local nasm_string=$(generate_nasm_string "'$string_content'")
-                echo "    ${LOG_LABEL}_tmpl$i db $nasm_string"
-            fi
+            generate_assembly_for_arg "${ARGS[$i]}" "$i"
         done
     else
         # Single argument
-        if [[ "$CONTENT" =~ ^\'.*\'$ ]] || [[ "$CONTENT" =~ ^\".*\"$ ]] || [[ "$CONTENT" =~ ^\`.*\`$ ]]; then
-            local nasm_string=$(generate_nasm_string "$CONTENT")
-            echo "    ${LOG_LABEL}_str db $nasm_string"
-        elif [[ "$CONTENT" =~ ^\`.*\$\{.*\}.*\`$ ]]; then
-            local string_content="${CONTENT:1:${#CONTENT}-2}"
-            string_content=$(echo "$string_content" | sed 's/\${[^}]*}//g')
-            local nasm_string=$(generate_nasm_string "'$string_content'")
-            echo "    ${LOG_LABEL}_tmpl db $nasm_string"
-        fi
+        generate_assembly_for_arg "$CONTENT" "0"
     fi
+    
+    # Add newline after each console.log
+    generate_newline
 }
 
-# Function to generate the print newline code
+# Function to generate print newline code
 generate_newline() {
     cat << 'EOF'
     ; Print newline after console.log
@@ -201,26 +282,6 @@ ensure_newline_constant() {
     fi
 }
 
-# Parse the console.log content and generate assembly code
-generate_console_log_code() {
-    echo "; === Generated console.log ==="
-    
-    if [[ "$CONTENT" == *","* ]]; then
-        # Multiple arguments
-        IFS=',' read -ra ARGS <<< "$CONTENT"
-        
-        for i in "${!ARGS[@]}"; do
-            generate_assembly_for_arg "${ARGS[$i]}" "$i"
-        done
-    else
-        # Single argument
-        generate_assembly_for_arg "$CONTENT" ""
-    fi
-    
-    # Add newline after each console.log
-    generate_newline
-}
-
 # Main execution
 if [ ! -f "$OUTPUT_FILE" ]; then
     echo "Error: $OUTPUT_FILE not found"
@@ -228,7 +289,7 @@ if [ ! -f "$OUTPUT_FILE" ]; then
 fi
 
 # Generate the data section content
-STRING_CONSTANTS=$(generate_string_constants)
+STRING_CONSTANTS=$(generate_string_constants "$CONTENT")
 
 # Generate the code section content
 CONSOLE_CODE=$(generate_console_log_code)

@@ -1,8 +1,7 @@
 #!/bin/bash
 
-# var.sh - Parses variable declarations and converts them to assembly data definitions
-# Only handles var declarations (ignores let and const)
-# Located 2 levels deeper than build_output.asm
+# var.sh - Converts JavaScript var declarations to NASM assembly data structures
+# Handles primitive types and nested arrays/objects (no functions)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -15,39 +14,29 @@ if [ ! -f "var_input" ]; then
 fi
 
 # Read and clean the input
-VAR_STATEMENT=$(cat var_input)
+INPUT_CONTENT=$(cat var_input | sed 's/<js-start>//g; s/<js-end>//g' | tr -d '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
-# Remove all newlines and extra spaces
-VAR_STATEMENT=$(echo "$VAR_STATEMENT" | tr -d '\n' | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
-# Remove trailing semicolon if present
-VAR_STATEMENT="${VAR_STATEMENT%;}"
-
-# Check if there are multiple declarations separated by semicolons
-# If yes, only process the first one and warn the user
-if [[ "$VAR_STATEMENT" =~ \; ]]; then
-    echo "Warning: Multiple declarations detected. Processing only the first declaration."
-    VAR_STATEMENT="${VAR_STATEMENT%%;*}"
-    echo "Processing: $VAR_STATEMENT"
+# Extract variable name and value
+if [[ "$INPUT_CONTENT" =~ ^var[[:space:]]+([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+    VAR_NAME="${BASH_REMATCH[1]}"
+    VAR_VALUE="${BASH_REMATCH[2]}"
+    # Remove trailing semicolon if present
+    VAR_VALUE="${VAR_VALUE%;}"
+else
+    echo "Error: Invalid variable declaration format"
+    exit 1
 fi
 
-# Function to check if a string is a number (integer or float)
-is_number() {
-    local str="$1"
-    # Check for integer or float (including negative numbers and scientific notation)
-    if [[ "$str" =~ ^-?[0-9]+$ ]] || 
-       [[ "$str" =~ ^-?[0-9]*\.?[0-9]+$ ]] ||
-       [[ "$str" =~ ^-?[0-9]+\.?[0-9]*[eE][+-]?[0-9]+$ ]]; then
-        return 0
-    else
-        return 1
-    fi
+# Function to generate unique labels
+generate_label() {
+    local prefix="$1"
+    echo "${prefix}_$(date +%s%N | md5sum | cut -c1-8)"
 }
 
-# Function to check if a string is a boolean
-is_boolean() {
+# Function to check if string is a number
+is_number() {
     local str="$1"
-    if [[ "$str" == "true" || "$str" == "false" ]]; then
+    if [[ "$str" =~ ^-?[0-9]+$ ]] || [[ "$str" =~ ^-?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$ ]]; then
         return 0
     else
         return 1
@@ -58,7 +47,6 @@ is_boolean() {
 escape_for_nasm() {
     local str="$1"
     
-    # If empty string, return 0
     if [ -z "$str" ]; then
         echo "0"
         return
@@ -93,7 +81,6 @@ escape_for_nasm() {
         fi
     done
     
-    # Clean up
     if [[ "$result" == "', "* ]] && [[ "$result" == *", '" ]]; then
         result="${result:3}"
         result="${result%\", \"}"
@@ -109,124 +96,344 @@ escape_for_nasm() {
     fi
 }
 
-# Function to check if variable already exists
-variable_exists() {
-    local var_name="$1"
-    if [ -f "$OUTPUT_FILE" ]; then
-        # Check if variable exists in data section
-        if grep -q "^[[:space:]]*${var_name}[[:space:]]\+" "$OUTPUT_FILE" || 
-           grep -q "^[[:space:]]*${var_name}_str[[:space:]]\+" "$OUTPUT_FILE" ||
-           grep -q "^[[:space:]]*${var_name}_size[[:space:]]\+" "$OUTPUT_FILE"; then
-            return 0
-        fi
-    fi
-    return 1
-}
-
-# Parse variable declaration
-# Only handles var declarations (ignores let and const)
-VAR_NAME=""
-VAR_VALUE=""
-
-# Extract variable name and value for var declarations
-if [[ "$VAR_STATEMENT" =~ ^var[[:space:]]+([a-zA-Z_][a-zA-Z0-9_]*)([[:space:]]*=[[:space:]]*(.*))? ]]; then
-    # var declaration
-    VAR_NAME="${BASH_REMATCH[1]}"
-    VAR_VALUE="${BASH_REMATCH[3]}"
+# Function to parse JSON-like value (simplified for JavaScript)
+parse_value() {
+    local value="$1"
+    local label_prefix="$2"
+    local depth="$3"
     
-    # Handle declarations without assignment (e.g., "var x;")
-    if [ -z "$VAR_VALUE" ]; then
-        VAR_VALUE="undefined"
-    fi
-else
-    echo "Error: Not a valid var declaration: $VAR_STATEMENT"
-    echo "Only var declarations are supported:"
-    echo "  var name = value"
-    echo "  var name;"
-    exit 1
-fi
-
-# Clean up VAR_VALUE - remove trailing spaces
-VAR_VALUE=$(echo "$VAR_VALUE" | sed 's/[[:space:]]*$//')
-
-# Check if variable already exists
-if variable_exists "$VAR_NAME"; then
-    echo "Error: Variable '$VAR_NAME' already exists. Cannot redeclare."
-    exit 1
-fi
-
-# Determine variable type and generate appropriate assembly
-generate_var_declaration() {
-    local name="$1"
-    local value="$2"
-    
-    # Trim value
+    # Trim whitespace
     value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     
-    # Check for special values first
-    if [[ "$value" == "undefined" ]]; then
-        echo "    ; Variable: $name = undefined"
-        echo "    $name dq 0"
+    # Check for null
+    if [ "$value" = "null" ]; then
+        echo "TYPE_NULL"
         return
-    elif [[ "$value" == "null" ]]; then
-        echo "    ; Variable: $name = null"
-        echo "    $name dq 0"
+    fi
+    
+    # Check for undefined
+    if [ "$value" = "undefined" ]; then
+        echo "TYPE_UNDEFINED"
         return
-    elif is_boolean "$value"; then
-        echo "    ; Variable: $name = $value"
-        if [[ "$value" == "true" ]]; then
-            echo "    $name dq 1"
+    fi
+    
+    # Check for boolean
+    if [ "$value" = "true" ] || [ "$value" = "false" ]; then
+        if [ "$value" = "true" ]; then
+            echo "TYPE_BOOL:1"
         else
-            echo "    $name dq 0"
+            echo "TYPE_BOOL:0"
         fi
         return
     fi
     
-    # Check for string literals (quoted)
-    if [[ "$value" =~ ^\"(.*)\"$ ]] || [[ "$value" =~ ^\'(.*)\'$ ]] || [[ "$value" =~ ^\`(.*)\`$ ]]; then
-        local string_content="${BASH_REMATCH[1]}"
-        local nasm_string=$(escape_for_nasm "$string_content")
-        echo "    ; Variable: $name = string"
-        echo "    ${name}_str db $nasm_string"
-        echo "    $name dq ${name}_str"
-        return
-    fi
-    
-    # Check for numbers
+    # Check for number
     if is_number "$value"; then
-        echo "    ; Variable: $name = $value"
+        echo "TYPE_NUMBER:$value"
+        return
+    fi
+    
+    # Check for string (starts and ends with quotes)
+    if [[ "$value" =~ ^\"([^\"]*)\"$ ]] || [[ "$value" =~ ^\'([^\']*)\'$ ]] || [[ "$value" =~ ^\`([^\`]*)\`$ ]]; then
+        local str_content="${BASH_REMATCH[1]}"
+        local escaped=$(escape_for_nasm "$str_content")
+        echo "TYPE_STRING:$escaped"
+        return
+    fi
+    
+    # Check for array
+    if [[ "$value" =~ ^\[(.*)\]$ ]]; then
+        local array_content="${BASH_REMATCH[1]}"
+        local array_label=$(generate_label "${label_prefix}_arr")
         
-        # Check if it's a float (has decimal point or scientific notation)
-        if [[ "$value" =~ \. ]] || [[ "$value" =~ [eE] ]]; then
-            # For floats, we'll store as integer representation
-            local int_value=$(echo "$value" | awk '{printf "%d", $1}')
-            echo "    $name dq $int_value"
-        else
-            # Integer
-            echo "    $name dq $value"
+        # Parse array elements
+        local elements=()
+        local current=""
+        local bracket_depth=0
+        local brace_depth=0
+        local in_string=false
+        local string_char=""
+        
+        for (( i=0; i<${#array_content}; i++ )); do
+            local char="${array_content:$i:1}"
+            local prev_char=""
+            [ $i -gt 0 ] && prev_char="${array_content:$((i-1)):1}"
+            
+            if [ "$in_string" = false ]; then
+                case "$char" in
+                    "[") ((bracket_depth++)) ;;
+                    "]") ((bracket_depth--)) ;;
+                    "{") ((brace_depth++)) ;;
+                    "}") ((brace_depth--)) ;;
+                    '"' | "'" | "\`")
+                        in_string=true
+                        string_char="$char"
+                        ;;
+                esac
+                
+                if [ "$char" = "," ] && [ $bracket_depth -eq 0 ] && [ $brace_depth -eq 0 ]; then
+                    elements+=("$current")
+                    current=""
+                else
+                    current="${current}${char}"
+                fi
+            else
+                current="${current}${char}"
+                if [ "$char" = "$string_char" ] && [ "$prev_char" != "\\" ]; then
+                    in_string=false
+                fi
+            fi
+        done
+        
+        # Add the last element if not empty
+        if [ -n "$current" ]; then
+            elements+=("$current")
         fi
+        
+        # Generate assembly for array
+        local array_asm=""
+        local element_labels=()
+        
+        for idx in "${!elements[@]}"; do
+            local element="${elements[$idx]}"
+            local element_label="${array_label}_elem${idx}"
+            local parsed=$(parse_value "$element" "$element_label" $((depth + 1)))
+            element_labels+=("$element_label:$parsed")
+        done
+        
+        # Store array structure
+        echo "TYPE_ARRAY:${#elements[@]}:${array_label}"
+        for elem_label in "${element_labels[@]}"; do
+            echo "ARRAY_ELEMENT:$elem_label"
+        done
         return
     fi
     
-    # Check for array literals (store as simple array marker for now)
-    if [[ "$value" =~ ^\[.*\]$ ]]; then
-        echo "    ; Variable: $name = array (simplified)"
-        # Create a simple array marker
-        echo "    $name dq 0xABCD  ; Array marker"
+    # Check for object
+    if [[ "$value" =~ ^\{(.*)\}$ ]]; then
+        local object_content="${BASH_REMATCH[1]}"
+        local object_label=$(generate_label "${label_prefix}_obj")
+        
+        # Parse object properties
+        local properties=()
+        local current=""
+        local bracket_depth=0
+        local brace_depth=0
+        local in_string=false
+        local string_char=""
+        
+        for (( i=0; i<${#object_content}; i++ )); do
+            local char="${object_content:$i:1}"
+            local prev_char=""
+            [ $i -gt 0 ] && prev_char="${object_content:$((i-1)):1}"
+            
+            if [ "$in_string" = false ]; then
+                case "$char" in
+                    "[") ((bracket_depth++)) ;;
+                    "]") ((bracket_depth--)) ;;
+                    "{") ((brace_depth++)) ;;
+                    "}") ((brace_depth--)) ;;
+                    '"' | "'" | "\`")
+                        in_string=true
+                        string_char="$char"
+                        ;;
+                esac
+                
+                if [ "$char" = "," ] && [ $bracket_depth -eq 0 ] && [ $brace_depth -eq 0 ]; then
+                    properties+=("$current")
+                    current=""
+                else
+                    current="${current}${char}"
+                fi
+            else
+                current="${current}${char}"
+                if [ "$char" = "$string_char" ] && [ "$prev_char" != "\\" ]; then
+                    in_string=false
+                fi
+            fi
+        done
+        
+        # Add the last property if not empty
+        if [ -n "$current" ]; then
+            properties+=("$current")
+        fi
+        
+        # Generate assembly for object
+        local property_labels=()
+        
+        for prop in "${properties[@]}"; do
+            # Split key and value
+            if [[ "$prop" =~ ^[[:space:]]*([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+                local key="${BASH_REMATCH[1]}"
+                local val="${BASH_REMATCH[2]}"
+                local prop_label="${object_label}_prop_${key}"
+                local parsed=$(parse_value "$val" "$prop_label" $((depth + 1)))
+                property_labels+=("$key:$prop_label:$parsed")
+            elif [[ "$prop" =~ ^[[:space:]]*\"([^\"]*)\"[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+                local key="${BASH_REMATCH[1]}"
+                local val="${BASH_REMATCH[2]}"
+                local prop_label="${object_label}_prop_${key}"
+                local parsed=$(parse_value "$val" "$prop_label" $((depth + 1)))
+                property_labels+=("$key:$prop_label:$parsed")
+            fi
+        done
+        
+        # Store object structure
+        echo "TYPE_OBJECT:${#properties[@]}:${object_label}"
+        for prop_label in "${property_labels[@]}"; do
+            echo "OBJECT_PROPERTY:$prop_label"
+        done
         return
     fi
     
-    # Check for object literals (store as simple object marker for now)
-    if [[ "$value" =~ ^\{.*\}$ ]]; then
-        echo "    ; Variable: $name = object (simplified)"
-        # Create a simple object marker
-        echo "    $name dq 0x1234  ; Object marker"
+    # Assume it's a reference to another variable
+    if [[ "$value" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+        echo "TYPE_REFERENCE:$value"
         return
     fi
     
-    # If we get here, we don't know what type it is
-    echo "    ; Variable: $name = unknown type (storing as 0)"
-    echo "    $name dq 0"
+    # Default to undefined
+    echo "TYPE_UNDEFINED"
+}
+
+# Function to generate assembly data structures
+generate_assembly_data() {
+    local parsed_output="$1"
+    local var_name="$2"
+    
+    # Split by newlines
+    IFS=$'\n' read -d '' -ra lines <<< "$parsed_output"
+    
+    local data_section=""
+    local current_array_label=""
+    local current_object_label=""
+    local array_elements=()
+    local object_properties=()
+    
+    for line in "${lines[@]}"; do
+        if [[ "$line" == TYPE_ARRAY:* ]]; then
+            # Array definition
+            IFS=':' read -ra parts <<< "$line"
+            local size="${parts[1]}"
+            current_array_label="${parts[2]}"
+            
+            data_section+="    ; Array: $current_array_label (size: $size)\n"
+            data_section+="    ${current_array_label}_size dq $size\n"
+            data_section+="    ${current_array_label}_data:\n"
+            
+        elif [[ "$line" == ARRAY_ELEMENT:* ]]; then
+            # Array element
+            local element_info="${line#ARRAY_ELEMENT:}"
+            IFS=':' read -ra elem_parts <<< "$element_info"
+            local elem_label="${elem_parts[0]}"
+            local elem_type="${elem_parts[1]}"
+            
+            array_elements+=("$elem_label:$elem_type")
+            
+        elif [[ "$line" == TYPE_OBJECT:* ]]; then
+            # Object definition
+            IFS=':' read -ra parts <<< "$line"
+            local size="${parts[1]}"
+            current_object_label="${parts[2]}"
+            
+            data_section+="    ; Object: $current_object_label (properties: $size)\n"
+            data_section+="    ${current_object_label}_size dq $size\n"
+            data_section+="    ${current_object_label}_data:\n"
+            
+        elif [[ "$line" == OBJECT_PROPERTY:* ]]; then
+            # Object property
+            local prop_info="${line#OBJECT_PROPERTY:}"
+            object_properties+=("$prop_info")
+            
+        elif [[ "$line" == TYPE_STRING:* ]]; then
+            # String type
+            local string_value="${line#TYPE_STRING:}"
+            data_section+="    db $string_value\n"
+            
+        elif [[ "$line" == TYPE_NUMBER:* ]]; then
+            # Number type
+            local number_value="${line#TYPE_NUMBER:}"
+            if [[ "$number_value" =~ \. ]]; then
+                # Float (store as string for now)
+                data_section+="    dq __float64__($number_value)\n"
+            else
+                # Integer
+                data_section+="    dq $number_value\n"
+            fi
+            
+        elif [[ "$line" == TYPE_BOOL:* ]]; then
+            # Boolean type
+            local bool_value="${line#TYPE_BOOL:}"
+            data_section+="    dq $bool_value\n"
+            
+        elif [[ "$line" == TYPE_NULL ]] || [[ "$line" == TYPE_UNDEFINED ]]; then
+            # Null or undefined
+            data_section+="    dq 0\n"
+        fi
+    done
+    
+    # Generate array elements
+    if [ ${#array_elements[@]} -gt 0 ]; then
+        for elem in "${array_elements[@]}"; do
+            IFS=':' read -ra parts <<< "$elem"
+            local elem_label="${parts[0]}"
+            local elem_type="${parts[1]}"
+            
+            if [[ "$elem_type" == TYPE_STRING:* ]]; then
+                local str_val="${elem_type#TYPE_STRING:}"
+                data_section+="    ${elem_label} db $str_val\n"
+            elif [[ "$elem_type" == TYPE_NUMBER:* ]]; then
+                local num_val="${elem_type#TYPE_NUMBER:}"
+                data_section+="    ${elem_label} dq $num_val\n"
+            elif [[ "$elem_type" == TYPE_BOOL:* ]]; then
+                local bool_val="${elem_type#TYPE_BOOL:}"
+                data_section+="    ${elem_label} dq $bool_val\n"
+            elif [[ "$elem_type" == TYPE_NULL ]] || [[ "$elem_type" == TYPE_UNDEFINED ]]; then
+                data_section+="    ${elem_label} dq 0\n"
+            fi
+        done
+    fi
+    
+    # Generate object properties
+    if [ ${#object_properties[@]} -gt 0 ]; then
+        for prop in "${object_properties[@]}"; do
+            IFS=':' read -ra parts <<< "$prop"
+            local key="${parts[0]}"
+            local prop_label="${parts[1]}"
+            local prop_type="${parts[2]}"
+            
+            # Store key as string
+            local key_escaped=$(escape_for_nasm "$key")
+            data_section+="    ${prop_label}_key db $key_escaped\n"
+            
+            # Store value based on type
+            if [[ "$prop_type" == TYPE_STRING:* ]]; then
+                local str_val="${prop_type#TYPE_STRING:}"
+                data_section+="    ${prop_label}_value db $str_val\n"
+                data_section+="    ${prop_label}_type dq 1 ; string type\n"
+            elif [[ "$prop_type" == TYPE_NUMBER:* ]]; then
+                local num_val="${prop_type#TYPE_NUMBER:}"
+                data_section+="    ${prop_label}_value dq $num_val\n"
+                data_section+="    ${prop_label}_type dq 2 ; number type\n"
+            elif [[ "$prop_type" == TYPE_BOOL:* ]]; then
+                local bool_val="${prop_type#TYPE_BOOL:}"
+                data_section+="    ${prop_label}_value dq $bool_val\n"
+                data_section+="    ${prop_label}_type dq 3 ; bool type\n"
+            elif [[ "$prop_type" == TYPE_NULL ]]; then
+                data_section+="    ${prop_label}_value dq 0\n"
+                data_section+="    ${prop_label}_type dq 4 ; null type\n"
+            elif [[ "$prop_type" == TYPE_UNDEFINED ]]; then
+                data_section+="    ${prop_label}_value dq 0\n"
+                data_section+="    ${prop_label}_type dq 5 ; undefined type\n"
+            fi
+        done
+    fi
+    
+    # Add the variable reference
+    data_section+="\n    ; Variable: $var_name\n"
+    data_section+="    $var_name dq 0 ; placeholder for variable reference\n"
+    
+    echo -e "$data_section"
 }
 
 # Main execution
@@ -235,26 +442,18 @@ if [ ! -f "$OUTPUT_FILE" ]; then
     exit 1
 fi
 
-# Generate the variable declaration
-VAR_DECLARATION=$(generate_var_declaration "$VAR_NAME" "$VAR_VALUE")
+# Parse the variable value
+PARSED_VALUE=$(parse_value "$VAR_VALUE" "$VAR_NAME" 0)
+
+# Generate assembly data
+ASSEMBLY_DATA=$(generate_assembly_data "$PARSED_VALUE" "$VAR_NAME")
 
 # Create temporary file
 TEMP_FILE=$(mktemp)
 
-# First, remove any existing declaration of this variable
-if variable_exists "$VAR_NAME"; then
-    echo "Removing existing declaration of $VAR_NAME..."
-    # Create a cleaned version without the old declaration
-    grep -v "^[[:space:]]*${VAR_NAME}[[:space:]]" "$OUTPUT_FILE" | \
-    grep -v "^[[:space:]]*${VAR_NAME}_str[[:space:]]" | \
-    grep -v "^[[:space:]]*${VAR_NAME}_size[[:space:]]" > "$TEMP_FILE"
-    mv "$TEMP_FILE" "$OUTPUT_FILE"
-    TEMP_FILE=$(mktemp)
-fi
-
-# Read the original file and insert variable in data section
+# Insert data into .data section
 IN_DATA_SECTION=0
-VAR_INSERTED=0
+DATA_INSERTED=0
 
 while IFS= read -r line; do
     # Check if we're entering the data section
@@ -266,13 +465,14 @@ while IFS= read -r line; do
     
     # Check if we're leaving the data section
     if [[ "$IN_DATA_SECTION" -eq 1 ]] && [[ "$line" == "section ."* ]]; then
-        # We're leaving data section, insert our variable before leaving
-        if [ "$VAR_INSERTED" -eq 0 ]; then
+        # We're leaving data section, insert our data before leaving
+        if [ "$DATA_INSERTED" -eq 0 ]; then
             echo "" >> "$TEMP_FILE"
             echo "    ; === Generated by var.sh ===" >> "$TEMP_FILE"
-            echo "$VAR_DECLARATION" >> "$TEMP_FILE"
-            VAR_INSERTED=1
+            echo -e "$ASSEMBLY_DATA" >> "$TEMP_FILE"
+            DATA_INSERTED=1
         fi
+        
         IN_DATA_SECTION=0
     fi
     
@@ -281,30 +481,16 @@ while IFS= read -r line; do
     
 done < "$OUTPUT_FILE"
 
-# If we never found data section or variable wasn't inserted, append at end
-if [ "$VAR_INSERTED" -eq 0 ]; then
-    # Check if there's a data section at all
-    if grep -q "section .data" "$TEMP_FILE"; then
-        # Insert at end of data section
-        sed -i '/section .data/,/^section \|^$/ {
-            /^section \|^$/ {
-                i\
-    ; === Generated by var.sh ===
-                i\
-'"$VAR_DECLARATION"'
-            }
-        }' "$TEMP_FILE"
-    else
-        # No data section, add one
-        echo "" >> "$TEMP_FILE"
-        echo "section .data" >> "$TEMP_FILE"
-        echo "    ; === Generated by var.sh ===" >> "$TEMP_FILE"
-        echo "$VAR_DECLARATION" >> "$TEMP_FILE"
-    fi
+# If we're still in data section at EOF, append data
+if [[ "$IN_DATA_SECTION" -eq 1 ]] && [ "$DATA_INSERTED" -eq 0 ]; then
+    echo "" >> "$TEMP_FILE"
+    echo "    ; === Generated by var.sh ===" >> "$TEMP_FILE"
+    echo -e "$ASSEMBLY_DATA" >> "$TEMP_FILE"
 fi
 
 # Replace the original file
 mv "$TEMP_FILE" "$OUTPUT_FILE"
 
-echo "Successfully appended variable declaration to $OUTPUT_FILE"
-echo "Variable: $VAR_NAME = $VAR_VALUE"
+echo "Successfully added variable declaration to $OUTPUT_FILE"
+echo "Variable: $VAR_NAME"
+echo "Value: $VAR_VALUE"

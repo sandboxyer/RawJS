@@ -2,6 +2,7 @@
 
 # build.sh - Optimized version with single-pass processing
 # Added execution time tracking with --silent option
+# Added support for .sh files in addition to .asm and binaries
 
 # Set strict mode for better error handling
 set -euo pipefail
@@ -100,17 +101,22 @@ parse_method_name() {
     echo "$method_part"
 }
 
-# Function to check if .asm file exists OR binary exists
-check_asm_exists() {
-    local asm_file="$1"
+# Function to check for available executable files in order of preference
+# Returns: "binary", "asm", "sh", or ""
+check_executable_exists() {
+    local base_path="$1"
     
-    # Check for .asm file
-    if [[ -f "$asm_file" ]]; then
+    # Check for binary (without extension) - HIGHEST PRIORITY
+    if [[ -f "$base_path" ]] && [[ -x "$base_path" || -x "${base_path%.*}" ]]; then
+        echo "binary"
+        return 0
+    # Check for .asm file - SECOND PRIORITY
+    elif [[ -f "${base_path}.asm" ]]; then
         echo "asm"
         return 0
-    # Check for binary (without .asm extension)
-    elif [[ -f "${asm_file%.asm}" ]]; then
-        echo "binary"
+    # Check for .sh file - THIRD PRIORITY
+    elif [[ -f "${base_path}.sh" ]]; then
+        echo "sh"
         return 0
     else
         echo ""
@@ -226,7 +232,46 @@ execute_binary() {
     fi
 }
 
-# Function to handle JavaScript-like content
+# Function to execute .sh files directly with bash
+execute_sh() {
+    local input_file="$1"
+    local sh_file="$2"
+    local execution_start_time=0
+    
+    # Make sure shell script is executable
+    chmod +x "$sh_file" 2>/dev/null || true
+    
+    if [[ "$SILENT_MODE" == false ]]; then
+        log_info "Executing shell script: bash $sh_file"
+    fi
+    
+    # Record execution start time
+    execution_start_time=$(get_timestamp_ms)
+    
+    # Execute shell script with bash and wait for completion
+    if bash "$sh_file" >/dev/null 2>&1; then
+        local execution_end_time=$(get_timestamp_ms)
+        local execution_duration=$((execution_end_time - execution_start_time))
+        TOTAL_EXECUTION_TIME=$((TOTAL_EXECUTION_TIME + execution_duration))
+        
+        if [[ "$SILENT_MODE" == false ]]; then
+            log_info "Shell script execution completed successfully ($(format_duration $execution_duration))"
+        fi
+        return 0
+    else
+        local exit_code=$?
+        local execution_end_time=$(get_timestamp_ms)
+        local execution_duration=$((execution_end_time - execution_start_time))
+        TOTAL_EXECUTION_TIME=$((TOTAL_EXECUTION_TIME + execution_duration))
+        
+        if [[ "$SILENT_MODE" == false ]]; then
+            log_error "Shell script execution failed with exit code: $exit_code ($(format_duration $execution_duration))"
+        fi
+        return $exit_code
+    fi
+}
+
+# Function to handle JavaScript-like content with support for .sh files
 handle_js_content() {
     local content="$1"
     
@@ -246,32 +291,42 @@ handle_js_content() {
         
         # Create declaration file with _input suffix
         local input_file="${JS_DIR}${declaration_type}_input"
-        local asm_file="${JS_DIR}${declaration_type}.asm"
-        local binary_file="${JS_DIR}${declaration_type}"
+        local base_file="${JS_DIR}${declaration_type}"
         
         if create_temp_file "$input_file" "$content"; then
             local file_type
-            file_type=$(check_asm_exists "$asm_file")
-            if [[ -n "$file_type" ]]; then
-                if [[ "$file_type" == "asm" ]]; then
-                    # Execute .asm file with basm.sh
-                    if execute_basm "$input_file" "$asm_file"; then
-                        processed_count=$((processed_count + 1))
-                    else
-                        error_count=$((error_count + 1))
-                    fi
-                elif [[ "$file_type" == "binary" ]]; then
+            file_type=$(check_executable_exists "$base_file")
+            
+            case "$file_type" in
+                "binary")
                     # Execute binary directly
-                    if execute_binary "$input_file" "$binary_file"; then
+                    if execute_binary "$input_file" "$base_file"; then
                         processed_count=$((processed_count + 1))
                     else
                         error_count=$((error_count + 1))
                     fi
-                fi
-            else
-                log_error "ASM file or binary not found: $asm_file or $binary_file"
-                error_count=$((error_count + 1))
-            fi
+                    ;;
+                "asm")
+                    # Execute .asm file with basm.sh
+                    if execute_basm "$input_file" "${base_file}.asm"; then
+                        processed_count=$((processed_count + 1))
+                    else
+                        error_count=$((error_count + 1))
+                    fi
+                    ;;
+                "sh")
+                    # Execute .sh file with bash
+                    if execute_sh "$input_file" "${base_file}.sh"; then
+                        processed_count=$((processed_count + 1))
+                    else
+                        error_count=$((error_count + 1))
+                    fi
+                    ;;
+                *)
+                    log_error "No executable found for declaration: $declaration_type (checked: $base_file, ${base_file}.asm, ${base_file}.sh)"
+                    error_count=$((error_count + 1))
+                    ;;
+            esac
         else
             error_count=$((error_count + 1))
         fi
@@ -305,36 +360,40 @@ handle_js_content() {
         
         # Create input file with _input suffix
         local input_file="${dir_path}${file_name}_input"
-        local asm_file="${dir_path}${file_name}.asm"
-        local binary_file="${dir_path}${file_name}"
+        local base_file="${dir_path}${file_name}"
         
         if [[ "$SILENT_MODE" == false ]]; then
-            log_info "Checking for ASM file or binary: $asm_file or $binary_file"
+            log_info "Checking for executable: $base_file (binary, .asm, or .sh)"
         fi
         
         local file_type
-        file_type=$(check_asm_exists "$asm_file")
+        file_type=$(check_executable_exists "$base_file")
         if [[ -n "$file_type" ]]; then
             if create_temp_file "$input_file" "$content"; then
-                if [[ "$file_type" == "asm" ]]; then
-                    # Execute .asm file with basm.sh
-                    if execute_basm "$input_file" "$asm_file"; then
-                        processed_count=$((processed_count + 1))
-                        return
-                    else
-                        error_count=$((error_count + 1))
-                        return
-                    fi
-                elif [[ "$file_type" == "binary" ]]; then
-                    # Execute binary directly
-                    if execute_binary "$input_file" "$binary_file"; then
-                        processed_count=$((processed_count + 1))
-                        return
-                    else
-                        error_count=$((error_count + 1))
-                        return
-                    fi
-                fi
+                case "$file_type" in
+                    "binary")
+                        if execute_binary "$input_file" "$base_file"; then
+                            processed_count=$((processed_count + 1))
+                        else
+                            error_count=$((error_count + 1))
+                        fi
+                        ;;
+                    "asm")
+                        if execute_basm "$input_file" "${base_file}.asm"; then
+                            processed_count=$((processed_count + 1))
+                        else
+                            error_count=$((error_count + 1))
+                        fi
+                        ;;
+                    "sh")
+                        if execute_sh "$input_file" "${base_file}.sh"; then
+                            processed_count=$((processed_count + 1))
+                        else
+                            error_count=$((error_count + 1))
+                        fi
+                        ;;
+                esac
+                return
             else
                 error_count=$((error_count + 1))
                 return
@@ -349,38 +408,45 @@ handle_js_content() {
     
     # Create fallback input file with _input suffix
     local input_file="${JS_DIR}call_input"
-    local asm_file="${JS_DIR}call.asm"
-    local binary_file="${JS_DIR}call"
+    local base_file="${JS_DIR}call"
     
     if create_temp_file "$input_file" "$content"; then
         local file_type
-        file_type=$(check_asm_exists "$asm_file")
-        if [[ -n "$file_type" ]]; then
-            if [[ "$file_type" == "asm" ]]; then
-                # Execute .asm file with basm.sh
-                if execute_basm "$input_file" "$asm_file"; then
+        file_type=$(check_executable_exists "$base_file")
+        
+        case "$file_type" in
+            "binary")
+                if execute_binary "$input_file" "$base_file"; then
                     processed_count=$((processed_count + 1))
                 else
                     error_count=$((error_count + 1))
                 fi
-            elif [[ "$file_type" == "binary" ]]; then
-                # Execute binary directly
-                if execute_binary "$input_file" "$binary_file"; then
+                ;;
+            "asm")
+                if execute_basm "$input_file" "${base_file}.asm"; then
                     processed_count=$((processed_count + 1))
                 else
                     error_count=$((error_count + 1))
                 fi
-            fi
-        else
-            log_error "Fallback ASM file or binary not found: $asm_file or $binary_file"
-            error_count=$((error_count + 1))
-        fi
+                ;;
+            "sh")
+                if execute_sh "$input_file" "${base_file}.sh"; then
+                    processed_count=$((processed_count + 1))
+                else
+                    error_count=$((error_count + 1))
+                fi
+                ;;
+            *)
+                log_error "Fallback executable not found: $base_file (binary, .asm, or .sh)"
+                error_count=$((error_count + 1))
+                ;;
+        esac
     else
         error_count=$((error_count + 1))
     fi
 }
 
-# Function to handle chain blocks
+# Function to handle chain blocks with .sh support
 handle_chain_block() {
     local content="$1"
     
@@ -390,32 +456,39 @@ handle_chain_block() {
     
     # Create chain input file with _input suffix
     local input_file="${CHAIN_DIR}chain_input"
-    local asm_file="${CHAIN_DIR}chain.asm"
-    local binary_file="${CHAIN_DIR}chain"
+    local base_file="${CHAIN_DIR}chain"
     
     if create_temp_file "$input_file" "$content"; then
         local file_type
-        file_type=$(check_asm_exists "$asm_file")
-        if [[ -n "$file_type" ]]; then
-            if [[ "$file_type" == "asm" ]]; then
-                # Execute .asm file with basm.sh
-                if execute_basm "$input_file" "$asm_file"; then
+        file_type=$(check_executable_exists "$base_file")
+        
+        case "$file_type" in
+            "binary")
+                if execute_binary "$input_file" "$base_file"; then
                     processed_count=$((processed_count + 1))
                 else
                     error_count=$((error_count + 1))
                 fi
-            elif [[ "$file_type" == "binary" ]]; then
-                # Execute binary directly
-                if execute_binary "$input_file" "$binary_file"; then
+                ;;
+            "asm")
+                if execute_basm "$input_file" "${base_file}.asm"; then
                     processed_count=$((processed_count + 1))
                 else
                     error_count=$((error_count + 1))
                 fi
-            fi
-        else
-            log_error "Chain ASM file or binary not found: $asm_file or $binary_file"
-            error_count=$((error_count + 1))
-        fi
+                ;;
+            "sh")
+                if execute_sh "$input_file" "${base_file}.sh"; then
+                    processed_count=$((processed_count + 1))
+                else
+                    error_count=$((error_count + 1))
+                fi
+                ;;
+            *)
+                log_error "Chain executable not found: $base_file (binary, .asm, or .sh)"
+                error_count=$((error_count + 1))
+                ;;
+        esac
     else
         error_count=$((error_count + 1))
     fi

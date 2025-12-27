@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # log.sh - Parses console.log() statements and converts them to assembly code
-# Enhanced version with proper variable type detection
+# Enhanced version with proper variable type detection for all primitive types
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -14,11 +14,18 @@ if [ ! -f "log_input" ]; then
     exit 1
 fi
 
-LOG_STATEMENT=$(cat log_input | tr -d '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+LOG_STATEMENT=$(cat log_input | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+# Remove trailing semicolon if present
+LOG_STATEMENT="${LOG_STATEMENT%;}"
 
 # Extract the content inside console.log()
-CONTENT="${LOG_STATEMENT#console.log(}"
-CONTENT="${CONTENT%);}"
+if [[ "$LOG_STATEMENT" =~ console\.log\((.*)\) ]]; then
+    CONTENT="${BASH_REMATCH[1]}"
+else
+    echo "Error: Invalid console.log statement format"
+    exit 1
+fi
 
 # Generate a unique label
 LOG_LABEL="log_$(date +%s%N | md5sum | cut -c1-8)"
@@ -27,7 +34,6 @@ LOG_LABEL="log_$(date +%s%N | md5sum | cut -c1-8)"
 escape_for_nasm() {
     local str="$1"
     
-    # If empty string, return 0
     if [ -z "$str" ]; then
         echo "0"
         return
@@ -39,53 +45,33 @@ escape_for_nasm() {
     
     while [ $i -lt $len ]; do
         local char="${str:$i:1}"
+        local char_code=$(printf "%d" "'$char")
         
         if [ "$char" = "\\" ] && [ $((i+1)) -lt $len ]; then
             local next_char="${str:$((i+1)):1}"
             case "$next_char" in
-                n)  result="${result}', 10, '" ;;
-                t)  result="${result}', 9, '" ;;
-                r)  result="${result}', 13, '" ;;
-                \\\\) result="${result}', 92, '" ;;
-                \") result="${result}', 34, '" ;;
-                \') result="${result}', 39, '" ;;
-                *)  result="${result}${char}${next_char}" ;;
+                n)  result="${result}10, " ;;
+                t)  result="${result}9, " ;;
+                r)  result="${result}13, " ;;
+                \\\\) result="${result}92, " ;;
+                \") result="${result}34, " ;;
+                \') result="${result}39, " ;;
+                *)  result="${result}92, ${next_char}, " ;;
             esac
             i=$((i+2))
         else
-            if [ "$char" = "'" ]; then
-                result="${result}''"
-            else
-                result="${result}${char}"
+            if [ $char_code -lt 128 ]; then
+                result="${result}${char_code}, "
             fi
             i=$((i+1))
         fi
     done
     
-    # Clean up
-    if [[ "$result" == "', "* ]] && [[ "$result" == *", '" ]]; then
-        result="${result:3}"
-        result="${result%\", \"}"
-        echo "'${result}', 0"
-    elif [[ "$result" == "', "* ]]; then
-        result="${result:3}"
-        echo "'${result}', 0"
-    elif [[ "$result" == *", '" ]]; then
-        result="${result%\", \"}"
-        echo "'${result}', 0"
+    result="${result%, }"
+    if [ -n "$result" ]; then
+        echo "${result}, 0"
     else
-        echo "'${result}', 0"
-    fi
-}
-
-# Function to check if a string is a number (integer or float)
-is_number() {
-    local str="$1"
-    # Check for integer or float (including negative numbers)
-    if [[ "$str" =~ ^-?[0-9]+$ ]] || [[ "$str" =~ ^-?[0-9]*\.?[0-9]+$ ]]; then
-        return 0
-    else
-        return 1
+        echo "0"
     fi
 }
 
@@ -98,12 +84,32 @@ get_variable_type() {
         return
     fi
     
+    # Get the most recent entry for this variable
     local type_info=$(grep "^$var_name:" "$TYPE_REGISTRY" | tail -1)
     
     if [ -z "$type_info" ]; then
         echo "unknown"
     else
         echo "$type_info" | cut -d: -f2
+    fi
+}
+
+# Function to get variable value from registry
+get_variable_value() {
+    local var_name="$1"
+    
+    if [ ! -f "$TYPE_REGISTRY" ]; then
+        echo ""
+        return
+    fi
+    
+    local type_info=$(grep "^$var_name:" "$TYPE_REGISTRY" | tail -1)
+    
+    if [ -z "$type_info" ]; then
+        echo ""
+    else
+        # Get everything after the second colon
+        echo "$type_info" | cut -d: -f3-
     fi
 }
 
@@ -115,42 +121,78 @@ generate_string_constants() {
         return
     fi
     
-    # Parse arguments
-    IFS=',' read -ra ARGS <<< "$args"
+    local constants=""
     
-    for i in "${!ARGS[@]}"; do
-        local arg=$(echo "${ARGS[$i]}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    # Parse arguments - handle quoted strings with commas inside
+    local in_quotes=false
+    local quote_char=""
+    local current_arg=""
+    local args_array=()
+    
+    for (( i=0; i<${#args}; i++ )); do
+        local char="${args:$i:1}"
+        local prev_char="${args:$((i-1)):1}" 2>/dev/null || true
+        
+        if [[ "$char" =~ [\"\'] ]] && [[ "$prev_char" != "\\" ]]; then
+            if [ "$in_quotes" = false ]; then
+                in_quotes=true
+                quote_char="$char"
+            elif [ "$char" = "$quote_char" ]; then
+                in_quotes=false
+            fi
+        fi
+        
+        if [ "$char" = "," ] && [ "$in_quotes" = false ]; then
+            args_array+=("$(echo "$current_arg" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')")
+            current_arg=""
+        else
+            current_arg="${current_arg}${char}"
+        fi
+    done
+    
+    # Add the last argument
+    if [ -n "$current_arg" ]; then
+        args_array+=("$(echo "$current_arg" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')")
+    fi
+    
+    # Generate constants for each argument
+    for i in "${!args_array[@]}"; do
+        local arg="${args_array[$i]}"
+        
+        # Remove surrounding quotes for processing
+        local processed_arg="$arg"
         
         # Check what type of argument this is
         case "$arg" in
             # Boolean values
             "true")
-                echo "    ${LOG_LABEL}_bool${i} db 'true', 0"
+                constants+="\n    ${LOG_LABEL}_bool${i} db 'true', 0"
                 ;;
             "false")
-                echo "    ${LOG_LABEL}_bool${i} db 'false', 0"
+                constants+="\n    ${LOG_LABEL}_bool${i} db 'false', 0"
                 ;;
             # Null
             "null")
-                echo "    ${LOG_LABEL}_null${i} db 'null', 0"
+                constants+="\n    ${LOG_LABEL}_null${i} db 'null', 0"
                 ;;
             # Undefined
             "undefined")
-                echo "    ${LOG_LABEL}_undef${i} db 'undefined', 0"
+                constants+="\n    ${LOG_LABEL}_undef${i} db 'undefined', 0"
                 ;;
-            # String literals
-            \'*\' | \"*\" | \`*\`)
-                # Remove surrounding quotes for processing
+            # String literals (with quotes)
+            \'*\' | \"*\")
+                # Remove surrounding quotes
                 local stripped="${arg:1:${#arg}-2}"
                 local nasm_string=$(escape_for_nasm "$stripped")
-                echo "    ${LOG_LABEL}_str${i} db $nasm_string"
+                constants+="\n    ${LOG_LABEL}_str${i} db $nasm_string"
                 ;;
             # Numbers (integers and floats)
             *)
-                if is_number "$arg"; then
-                    # For floats, we need to create a string representation
-                    if [[ "$arg" =~ \. ]]; then
-                        echo "    ${LOG_LABEL}_float${i} db '$arg', 0"
+                # Check if it's a number
+                if [[ "$arg" =~ ^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$ ]] && [[ ! "$arg" =~ ^-?0[0-9]+ ]]; then
+                    # For floats, create string representation
+                    if [[ "$arg" =~ \. ]] || [[ "$arg" =~ [eE] ]]; then
+                        constants+="\n    ${LOG_LABEL}_num${i} db '$arg', 0"
                     fi
                 else
                     # Check if it's a variable
@@ -162,34 +204,28 @@ generate_string_constants() {
                             "string")
                                 # String variables don't need extra constants
                                 ;;
-                            "boolean")
-                                echo "    ${LOG_LABEL}_bool${i}_true db 'true', 0"
-                                echo "    ${LOG_LABEL}_bool${i}_false db 'false', 0"
-                                ;;
                             "float")
-                                echo "    ${LOG_LABEL}_float${i} db '0.0', 0 ; placeholder for float variable"
+                                # Create a string representation of the float
+                                local float_value=$(get_variable_value "$arg")
+                                constants+="\n    ${LOG_LABEL}_float${i} db '$float_value', 0"
                                 ;;
                         esac
-                    elif [[ "$arg" =~ [+*/-] ]] && [[ ! "$arg" =~ ['"\`'] ]]; then
-                        # It's an expression
-                        local result=$(echo "$arg" | bc 2>/dev/null || echo "0")
-                        if [[ "$result" =~ \. ]]; then
-                            echo "    ${LOG_LABEL}_expr${i} db '$result', 0"
-                        fi
                     fi
                 fi
                 ;;
         esac
     done
+    
+    echo -e "$constants"
 }
 
 # Function to generate assembly code for a single argument
 generate_assembly_for_arg() {
     local arg="$1"
     local arg_index="$2"
-    local trimmed_arg=$(echo "$arg" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     
-    case "$trimmed_arg" in
+    # Check what type of argument this is
+    case "$arg" in
         # Boolean literals
         "true")
             echo "    mov rsi, ${LOG_LABEL}_bool${arg_index}"
@@ -210,104 +246,73 @@ generate_assembly_for_arg() {
             echo "    call print_str"
             ;;
         # String literals
-        \'*\' | \"*\" | \`*\`)
+        \'*\' | \"*\")
             echo "    mov rsi, ${LOG_LABEL}_str${arg_index}"
             echo "    call print_str"
             ;;
         # Numbers and variables
         *)
-            if is_number "$trimmed_arg"; then
+            # Check if it's a number
+            if [[ "$arg" =~ ^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$ ]] && [[ ! "$arg" =~ ^-?0[0-9]+ ]]; then
                 # Check if it's a float
-                if [[ "$trimmed_arg" =~ \. ]]; then
-                    # Float literal - print as string
-                    echo "    mov rsi, ${LOG_LABEL}_float${arg_index}"
+                if [[ "$arg" =~ \. ]] || [[ "$arg" =~ [eE] ]]; then
+                    # Float - print as string
+                    echo "    mov rsi, ${LOG_LABEL}_num${arg_index}"
                     echo "    call print_str"
                 else
-                    # Integer literal - print as number
-                    echo "    mov rax, $trimmed_arg"
+                    # Integer - print as number
+                    echo "    mov rax, $arg"
                     echo "    call print_num"
                 fi
             else
-                # Check if it's a mathematical expression
-                if [[ "$trimmed_arg" =~ [+*/-] ]] && [[ ! "$trimmed_arg" =~ ['"\`'] ]]; then
-                    # Evaluate the expression
-                    local result=$(echo "$trimmed_arg" | bc 2>/dev/null || echo "0")
-                    # Check if result is float
-                    if [[ "$result" =~ \. ]]; then
-                        echo "    mov rsi, ${LOG_LABEL}_expr${arg_index}"
+                # Assume it's a variable
+                local var_name="$arg"
+                
+                # Get variable type from registry
+                local var_type=$(get_variable_type "$var_name")
+                
+                # Generate appropriate code based on type
+                case "$var_type" in
+                    "string")
+                        echo "    mov rsi, $var_name"
                         echo "    call print_str"
-                    else
-                        echo "    mov rax, $result"
+                        ;;
+                    "integer")
+                        echo "    mov rax, [$var_name]"
                         echo "    call print_num"
-                    fi
-                else
-                    # Assume it's a variable
-                    local var_name=$(echo "$trimmed_arg" | sed "s/^['\"]//;s/['\"]\$//")
-                    
-                    # Check if it's a valid variable name
-                    if [[ "$var_name" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
-                        # Get variable type from registry
-                        local var_type=$(get_variable_type "$var_name")
-                        
-                        # Generate appropriate code based on type
-                        case "$var_type" in
-                            "string")
-                                echo "    ; String variable: $var_name"
-                                echo "    mov rsi, $var_name"
-                                echo "    call print_str"
-                                ;;
-                            "integer")
-                                echo "    ; Integer variable: $var_name"
-                                echo "    mov rax, [$var_name]"
-                                echo "    call print_num"
-                                ;;
-                            "float")
-                                echo "    ; Float variable: $var_name"
-                                echo "    ; Note: print_num expects integer, float needs special handling"
-                                echo "    ; For now, converting to string representation"
-                                echo "    mov rsi, ${LOG_LABEL}_float${arg_index}"
-                                echo "    call print_str"
-                                ;;
-                            "boolean")
-                                echo "    ; Boolean variable: $var_name"
-                                echo "    cmp qword [$var_name], 0"
-                                echo "    je .${LOG_LABEL}_false${arg_index}"
-                                echo "    mov rsi, ${LOG_LABEL}_bool${arg_index}_true"
-                                echo "    call print_str"
-                                echo "    jmp .${LOG_LABEL}_bool_done${arg_index}"
-                                echo ".${LOG_LABEL}_false${arg_index}:"
-                                echo "    mov rsi, ${LOG_LABEL}_bool${arg_index}_false"
-                                echo "    call print_str"
-                                echo ".${LOG_LABEL}_bool_done${arg_index}:"
-                                ;;
-                            "null")
-                                echo "    mov rsi, ${LOG_LABEL}_null${arg_index}"
-                                echo "    call print_str"
-                                ;;
-                            "undefined")
-                                echo "    mov rsi, ${LOG_LABEL}_undef${arg_index}"
-                                echo "    call print_str"
-                                ;;
-                            *)
-                                # Unknown type - try to print as string first, then as number
-                                echo "    ; Unknown variable type: $var_name"
-                                echo "    ; Attempting to print as string"
-                                echo "    mov rsi, $var_name"
-                                echo "    call print_str"
-                                ;;
-                        esac
-                    else
-                        # If not a valid variable name, try to treat as number
-                        if [[ "$var_name" =~ ^[0-9]+$ ]]; then
-                            echo "    mov rax, $var_name"
-                            echo "    call print_num"
-                        else
-                            # Default to printing 0
-                            echo "    mov rax, 0"
-                            echo "    call print_num"
-                        fi
-                    fi
-                fi
+                        ;;
+                    "float")
+                        echo "    mov rsi, ${LOG_LABEL}_float${arg_index}"
+                        echo "    call print_str"
+                        ;;
+                    "boolean")
+                        echo "    ; Boolean variable: $var_name"
+                        echo "    mov rax, [$var_name]"
+                        echo "    cmp rax, 0"
+                        echo "    je .${LOG_LABEL}_false${arg_index}"
+                        echo "    mov rsi, ${LOG_LABEL}_bool${arg_index}"
+                        echo "    call print_str"
+                        echo "    jmp .${LOG_LABEL}_done${arg_index}"
+                        echo ".${LOG_LABEL}_false${arg_index}:"
+                        echo "    mov rsi, ${LOG_LABEL}_bool${arg_index}_false"
+                        echo "    call print_str"
+                        echo ".${LOG_LABEL}_done${arg_index}:"
+                        ;;
+                    "null")
+                        echo "    mov rsi, ${LOG_LABEL}_null${arg_index}"
+                        echo "    call print_str"
+                        ;;
+                    "undefined")
+                        echo "    mov rsi, ${LOG_LABEL}_undef${arg_index}"
+                        echo "    call print_str"
+                        ;;
+                    *)
+                        # Unknown type - try to print as string
+                        echo "    ; Unknown type for variable: $var_name"
+                        echo "    mov rsi, $var_name"
+                        echo "    call print_str"
+                        ;;
+                esac
             fi
             ;;
     esac
@@ -315,55 +320,64 @@ generate_assembly_for_arg() {
 
 # Function to generate the console.log assembly code
 generate_console_log_code() {
-    echo "; === Generated console.log ==="
+    local code=""
     
     if [ -z "$CONTENT" ]; then
-        # Empty console.log()
-        echo "; Empty console.log"
-        generate_newline
+        # Empty console.log() - just print newline
+        echo "    ; Empty console.log"
+        echo "    mov rsi, newline"
+        echo "    call print_str"
         return
     fi
     
-    # Check if there are multiple arguments
-    if [[ "$CONTENT" == *","* ]]; then
-        # Multiple arguments
-        IFS=',' read -ra ARGS <<< "$CONTENT"
+    # Parse arguments
+    local in_quotes=false
+    local quote_char=""
+    local current_arg=""
+    local args_array=()
+    
+    for (( i=0; i<${#CONTENT}; i++ )); do
+        local char="${CONTENT:$i:1}"
+        local prev_char="${CONTENT:$((i-1)):1}" 2>/dev/null || true
         
-        for i in "${!ARGS[@]}"; do
-            generate_assembly_for_arg "${ARGS[$i]}" "$i"
-            
-            # Add space between arguments (except last one)
-            if [ $i -lt $((${#ARGS[@]} - 1)) ]; then
-                echo "    ; Space between arguments"
-                echo "    mov rsi, space"
-                echo "    call print_str"
+        if [[ "$char" =~ [\"\'] ]] && [[ "$prev_char" != "\\" ]]; then
+            if [ "$in_quotes" = false ]; then
+                in_quotes=true
+                quote_char="$char"
+            elif [ "$char" = "$quote_char" ]; then
+                in_quotes=false
             fi
-        done
-    else
-        # Single argument
-        generate_assembly_for_arg "$CONTENT" "0"
+        fi
+        
+        if [ "$char" = "," ] && [ "$in_quotes" = false ]; then
+            args_array+=("$(echo "$current_arg" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')")
+            current_arg=""
+        else
+            current_arg="${current_arg}${char}"
+        fi
+    done
+    
+    # Add the last argument
+    if [ -n "$current_arg" ]; then
+        args_array+=("$(echo "$current_arg" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')")
     fi
     
+    # Generate code for each argument
+    for i in "${!args_array[@]}"; do
+        generate_assembly_for_arg "${args_array[$i]}" "$i"
+        
+        # Add space between arguments (except last one)
+        if [ $i -lt $((${#args_array[@]} - 1)) ]; then
+            echo "    ; Space between arguments"
+            echo "    mov rsi, space"
+            echo "    call print_str"
+        fi
+    done
+    
     # Add newline after each console.log
-    generate_newline
-}
-
-# Function to generate print newline code
-generate_newline() {
-    cat << 'EOF'
-    ; Print newline after console.log
-    mov rsi, newline
-    call print_str
-EOF
-}
-
-# Function to check and add space constant
-ensure_space_constant() {
-    if ! grep -q "space db ' ', 0" "$OUTPUT_FILE"; then
-        echo ""
-        echo "    ; Space constant for console.log separators"
-        echo "    space db ' ', 0"
-    fi
+    echo "    ; Newline after console.log"
+    echo "    mov rsi, newline"
+    echo "    call print_str"
 }
 
 # Main execution
@@ -381,14 +395,22 @@ CONSOLE_CODE=$(generate_console_log_code)
 # Create temporary file
 TEMP_FILE=$(mktemp)
 
-# Check if newline constant exists
-HAS_NEWLINE_CONSTANT=$(grep -c "newline db 10, 0" "$OUTPUT_FILE")
-
 # Read the original file and insert at appropriate places
 IN_DATA_SECTION=0
 IN_START_SECTION=0
 CODE_INSERTED=0
 DATA_INSERTED=0
+HAS_NEWLINE_CONSTANT=0
+HAS_SPACE_CONSTANT=0
+
+# First check if constants exist
+if grep -q "newline db 10, 0" "$OUTPUT_FILE"; then
+    HAS_NEWLINE_CONSTANT=1
+fi
+
+if grep -q "space db ' ', 0" "$OUTPUT_FILE"; then
+    HAS_SPACE_CONSTANT=1
+fi
 
 while IFS= read -r line; do
     # Check if we're entering the data section
@@ -399,22 +421,21 @@ while IFS= read -r line; do
     fi
     
     # Check if we're leaving the data section
-    if [[ "$IN_DATA_SECTION" -eq 1 ]] && [[ "$line" == "section ."* ]]; then
+    if [[ "$IN_DATA_SECTION" -eq 1 ]] && [[ "$line" == section* ]]; then
         # We're leaving data section, insert our constants before leaving
         if [ -n "$STRING_CONSTANTS" ] && [ "$DATA_INSERTED" -eq 0 ]; then
-            echo "" >> "$TEMP_FILE"
-            echo "    ; === Generated by log.sh ===" >> "$TEMP_FILE"
-            echo "$STRING_CONSTANTS" >> "$TEMP_FILE"
+            echo -e "$STRING_CONSTANTS" >> "$TEMP_FILE"
             DATA_INSERTED=1
         fi
         
         # Add space constant if needed
-        ensure_space_constant
+        if [ "$HAS_SPACE_CONSTANT" -eq 0 ]; then
+            echo "    space db ' ', 0" >> "$TEMP_FILE"
+            HAS_SPACE_CONSTANT=1
+        fi
         
         # Add newline constant if needed
         if [ "$HAS_NEWLINE_CONSTANT" -eq 0 ]; then
-            echo "" >> "$TEMP_FILE"
-            echo "    ; Newline constant for console.log" >> "$TEMP_FILE"
             echo "    newline db 10, 0" >> "$TEMP_FILE"
             HAS_NEWLINE_CONSTANT=1
         fi
@@ -427,8 +448,7 @@ while IFS= read -r line; do
         IN_START_SECTION=1
     fi
     
-    # Find a good place to insert console.log code
-    # Look for lines that look like exit code
+    # Find a good place to insert console.log code (before exit)
     if [[ "$IN_START_SECTION" -eq 1 ]] && 
        [[ "$CODE_INSERTED" -eq 0 ]] && 
        [[ "$line" =~ ^[[:space:]]*mov[[:space:]]+rax,[[:space:]]*60 ]] &&
@@ -436,7 +456,6 @@ while IFS= read -r line; do
         # Insert our generated code before the exit
         echo "" >> "$TEMP_FILE"
         echo "$CONSOLE_CODE" >> "$TEMP_FILE"
-        echo "" >> "$TEMP_FILE"
         CODE_INSERTED=1
     fi
     
@@ -453,18 +472,18 @@ fi
 
 # If we're still in data section at EOF, append constants
 if [[ "$IN_DATA_SECTION" -eq 1 ]] && [ -n "$STRING_CONSTANTS" ] && [ "$DATA_INSERTED" -eq 0 ]; then
-    echo "" >> "$TEMP_FILE"
-    echo "    ; === Generated by log.sh ===" >> "$TEMP_FILE"
-    echo "$STRING_CONSTANTS" >> "$TEMP_FILE"
+    echo -e "$STRING_CONSTANTS" >> "$TEMP_FILE"
     
     # Add space constant if needed
-    ensure_space_constant
+    if [ "$HAS_SPACE_CONSTANT" -eq 0 ]; then
+        echo "    space db ' ', 0" >> "$TEMP_FILE"
+        HAS_SPACE_CONSTANT=1
+    fi
     
     # Add newline constant if needed
     if [ "$HAS_NEWLINE_CONSTANT" -eq 0 ]; then
-        echo "" >> "$TEMP_FILE"
-        echo "    ; Newline constant for console.log" >> "$TEMP_FILE"
         echo "    newline db 10, 0" >> "$TEMP_FILE"
+        HAS_NEWLINE_CONSTANT=1
     fi
 fi
 
@@ -472,4 +491,4 @@ fi
 mv "$TEMP_FILE" "$OUTPUT_FILE"
 
 echo "Successfully appended console.log assembly code to $OUTPUT_FILE"
-echo "Parsed statement: $LOG_STATEMENT"
+echo "Parsed statement: console.log($CONTENT)"

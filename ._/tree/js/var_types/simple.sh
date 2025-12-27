@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # simple.sh - Converts JavaScript var declarations to NASM assembly data structures
-# Enhanced version with type tracking for proper console.log support
+# Handles all primitive types: string, number, boolean, null, undefined, float
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -10,20 +10,26 @@ OUTPUT_FILE="../../../build_output.asm"
 INPUT_FILE="../var_input"
 TYPE_REGISTRY="var_types.txt"
 
+# Ensure type registry exists
+touch "$SCRIPT_DIR/$TYPE_REGISTRY"
+
 if [ ! -f "$INPUT_FILE" ]; then
     echo "Error: $INPUT_FILE not found"
     exit 1
 fi
 
 # Read and clean the input
-INPUT_CONTENT=$(cat "$INPUT_FILE" | tr -d '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+INPUT_CONTENT=$(cat "$INPUT_FILE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+# Remove trailing semicolon if present
+INPUT_CONTENT="${INPUT_CONTENT%;}"
 
 # Extract variable name and value
 if [[ "$INPUT_CONTENT" =~ ^var[[:space:]]+([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
     VAR_NAME="${BASH_REMATCH[1]}"
     VAR_VALUE="${BASH_REMATCH[2]}"
-    # Remove trailing semicolon if present
-    VAR_VALUE="${VAR_VALUE%;}"
+    # Remove surrounding whitespace
+    VAR_VALUE=$(echo "$VAR_VALUE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 else
     echo "Error: Invalid variable declaration format"
     echo "Expected format: var variableName = value"
@@ -31,7 +37,6 @@ else
 fi
 
 # Function to escape strings for NASM
-# Function to escape strings for NASM with UTF-8 support
 escape_for_nasm() {
     local str="$1"
     
@@ -46,6 +51,7 @@ escape_for_nasm() {
     
     while [ $i -lt $len ]; do
         local char="${str:$i:1}"
+        local char_code=$(printf "%d" "'$char")
         
         # Handle escape sequences
         if [ "$char" = "\\" ] && [ $((i+1)) -lt $len ]; then
@@ -61,19 +67,9 @@ escape_for_nasm() {
             esac
             i=$((i+2))
         else
-            # Handle UTF-8 characters (non-ASCII)
-            local char_code=$(printf "%d" "'$char")
-            
             # ASCII characters (0-127) - single byte
             if [ $char_code -lt 128 ]; then
                 result="${result}${char_code}, "
-            else
-                # UTF-8 multi-byte character - get proper byte sequence
-                # Use printf to get hex representation
-                local hex_bytes=$(printf "$char" | od -t x1 -An | tr -d ' \n' | sed 's/\(..\)/0x\1, /g')
-                # Remove trailing comma and space, add proper formatting
-                hex_bytes="${hex_bytes%, }"
-                result="${result}${hex_bytes}, "
             fi
             i=$((i+1))
         fi
@@ -118,15 +114,7 @@ process_primitive_type() {
     fi
     
     # Check for string (starts and ends with quotes)
-    if [[ "$value" =~ ^\"([^\"]*)\"$ ]]; then
-        local str_content="${BASH_REMATCH[1]}"
-        local escaped=$(escape_for_nasm "$str_content")
-        echo "STRING:$escaped"
-        return
-    fi
-    
-    # Check for string with single quotes
-    if [[ "$value" =~ ^\'([^\']*)\'$ ]]; then
+    if [[ "$value" =~ ^\"([^\"]*)\"$ ]] || [[ "$value" =~ ^\'([^\']*)\'$ ]]; then
         local str_content="${BASH_REMATCH[1]}"
         local escaped=$(escape_for_nasm "$str_content")
         echo "STRING:$escaped"
@@ -134,25 +122,19 @@ process_primitive_type() {
     fi
     
     # Check for number (integer or float)
-    if [[ "$value" =~ ^-?[0-9]+$ ]]; then
-        echo "INTEGER:$value"
-        return
-    fi
-    
-    if [[ "$value" =~ ^-?[0-9]*\.[0-9]+$ ]] || [[ "$value" =~ ^-?[0-9]+\.[0-9]*$ ]]; then
-        # Check if it can be represented as integer (no decimal part)
-        if [[ "$value" =~ ^-?[0-9]+\.0*$ ]] || [[ "$value" =~ ^-?0*\.0*$ ]]; then
-            local int_part=$(echo "$value" | sed 's/\..*$//')
-            echo "INTEGER:${int_part:-0}"
-        else
-            echo "FLOAT:$value"
+    # Check if it's a valid number (including negative, decimal, and scientific notation)
+    if [[ "$value" =~ ^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$ ]] && [[ ! "$value" =~ ^-?0[0-9]+ ]]; then
+        # Check if it has a decimal point or scientific notation (treat as float)
+        if [[ "$value" =~ \. ]] || [[ "$value" =~ [eE] ]]; then
+            # Try to parse as float
+            if [[ "$value" =~ ^-?[0-9]*\.[0-9]+$ ]] || [[ "$value" =~ ^-?[0-9]+\.?[0-9]*[eE][-+]?[0-9]+$ ]]; then
+                echo "FLOAT:$value"
+                return
+            fi
         fi
-        return
-    fi
-    
-    # Check for scientific notation
-    if [[ "$value" =~ ^-?[0-9]*\.?[0-9]+[eE][-+]?[0-9]+$ ]]; then
-        echo "FLOAT:$value"
+        
+        # Otherwise treat as integer
+        echo "INTEGER:$value"
         return
     fi
     
@@ -162,8 +144,9 @@ process_primitive_type() {
         return
     fi
     
-    # Default to undefined for unrecognized types
-    echo "UNDEFINED"
+    # Default to string if no other type matches (quotes might have been stripped)
+    local escaped=$(escape_for_nasm "$value")
+    echo "STRING:$escaped"
 }
 
 # Function to generate assembly data for primitive type
@@ -172,42 +155,39 @@ generate_assembly_for_primitive() {
     local processed_value="$2"
     local type_label="$3"
     
-    local assembly_data=""
-    
-    # Add comment for the variable
-    assembly_data="    ; Variable: $var_name (type: $type_label)\n"
+    local assembly_data="\n    ; Variable: $var_name = $VAR_VALUE (type: $type_label)"
     
     # Determine the type and generate appropriate assembly
     case "$processed_value" in
         "NULL")
-            assembly_data+="    ${var_name} dq 0 ; type: null\n"
+            assembly_data+="\n    ${var_name} dq 0 ; null value"
             ;;
         "UNDEFINED")
-            assembly_data+="    ${var_name} dq 0 ; type: undefined\n"
+            assembly_data+="\n    ${var_name} dq 0 ; undefined value"
             ;;
         "BOOL:"*)
             local bool_value="${processed_value#BOOL:}"
-            assembly_data+="    ${var_name} dq $bool_value ; type: boolean\n"
+            assembly_data+="\n    ${var_name} dq $bool_value ; boolean"
             ;;
         "STRING:"*)
             local string_data="${processed_value#STRING:}"
-            assembly_data+="    ${var_name} db $string_data ; type: string\n"
+            assembly_data+="\n    ${var_name} db $string_data ; string"
             ;;
         "INTEGER:"*)
             local int_value="${processed_value#INTEGER:}"
-            assembly_data+="    ${var_name} dq $int_value ; type: integer\n"
+            assembly_data+="\n    ${var_name} dq $int_value ; integer"
             ;;
         "FLOAT:"*)
             local float_value="${processed_value#FLOAT:}"
             # Store float as QWORD (8-byte double precision)
-            assembly_data+="    ${var_name} dq __float64__($float_value) ; type: float\n"
+            assembly_data+="\n    ${var_name} dq __float64__($float_value) ; float"
             ;;
         "REFERENCE:"*)
             local ref_name="${processed_value#REFERENCE:}"
-            assembly_data+="    ${var_name} dq ${ref_name} ; type: reference to $ref_name\n"
+            assembly_data+="\n    ${var_name} dq $ref_name ; reference to $ref_name"
             ;;
         *)
-            assembly_data+="    ${var_name} dq 0 ; type: unknown\n"
+            assembly_data+="\n    ${var_name} dq 0 ; unknown type"
             ;;
     esac
     
@@ -220,7 +200,11 @@ register_variable_type() {
     local var_type="$2"
     local value="$3"
     
-    # Create or append to type registry
+    # Remove existing entry for this variable if it exists
+    grep -v "^$var_name:" "$SCRIPT_DIR/$TYPE_REGISTRY" > "$SCRIPT_DIR/${TYPE_REGISTRY}.tmp"
+    mv "$SCRIPT_DIR/${TYPE_REGISTRY}.tmp" "$SCRIPT_DIR/$TYPE_REGISTRY"
+    
+    # Add new entry
     echo "$var_name:$var_type:$value" >> "$SCRIPT_DIR/$TYPE_REGISTRY"
 }
 
@@ -269,11 +253,9 @@ while IFS= read -r line; do
     fi
     
     # Check if we're leaving the data section
-    if [[ "$IN_DATA_SECTION" -eq 1 ]] && [[ "$line" == "section ."* ]]; then
+    if [[ "$IN_DATA_SECTION" -eq 1 ]] && [[ "$line" == section* ]]; then
         # We're leaving data section, insert our data before leaving
         if [ "$DATA_INSERTED" -eq 0 ]; then
-            echo "" >> "$TEMP_FILE"
-            echo "    ; === Generated by simple.sh ===" >> "$TEMP_FILE"
             echo -e "$ASSEMBLY_DATA" >> "$TEMP_FILE"
             DATA_INSERTED=1
         fi
@@ -288,8 +270,6 @@ done < "$OUTPUT_FILE"
 
 # If we're still in data section at EOF, append data
 if [[ "$IN_DATA_SECTION" -eq 1 ]] && [ "$DATA_INSERTED" -eq 0 ]; then
-    echo "" >> "$TEMP_FILE"
-    echo "    ; === Generated by simple.sh ===" >> "$TEMP_FILE"
     echo -e "$ASSEMBLY_DATA" >> "$TEMP_FILE"
 fi
 
@@ -297,7 +277,6 @@ fi
 mv "$TEMP_FILE" "$OUTPUT_FILE"
 
 echo "Successfully added variable declaration to $OUTPUT_FILE"
-echo "Variable: $VAR_NAME"
-echo "Value: $VAR_VALUE"
+echo "Variable: $VAR_NAME = $VAR_VALUE"
 echo "Type: $TYPE_LABEL"
 echo "Registered in: $SCRIPT_DIR/$TYPE_REGISTRY"

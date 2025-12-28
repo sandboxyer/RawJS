@@ -8,10 +8,6 @@ cd "$SCRIPT_DIR"
 
 OUTPUT_FILE="../../../build_output.asm"
 INPUT_FILE="../var_input"
-TYPE_REGISTRY="var_types.txt"
-
-# Ensure type registry exists
-touch "$SCRIPT_DIR/$TYPE_REGISTRY"
 
 if [ ! -f "$INPUT_FILE" ]; then
     echo "Error: $INPUT_FILE not found"
@@ -194,20 +190,6 @@ generate_assembly_for_primitive() {
     echo -e "$assembly_data"
 }
 
-# Function to register variable type
-register_variable_type() {
-    local var_name="$1"
-    local var_type="$2"
-    local value="$3"
-    
-    # Remove existing entry for this variable if it exists
-    grep -v "^$var_name:" "$SCRIPT_DIR/$TYPE_REGISTRY" > "$SCRIPT_DIR/${TYPE_REGISTRY}.tmp"
-    mv "$SCRIPT_DIR/${TYPE_REGISTRY}.tmp" "$SCRIPT_DIR/$TYPE_REGISTRY"
-    
-    # Add new entry
-    echo "$var_name:$var_type:$value" >> "$SCRIPT_DIR/$TYPE_REGISTRY"
-}
-
 # Main execution
 if [ ! -f "$OUTPUT_FILE" ]; then
     echo "Error: $OUTPUT_FILE not found"
@@ -218,7 +200,7 @@ fi
 # Process the variable value
 PROCESSED_VALUE=$(process_primitive_type "$VAR_VALUE")
 
-# Extract type label for registration
+# Extract type label for display
 TYPE_LABEL=""
 case "$PROCESSED_VALUE" in
     "NULL") TYPE_LABEL="null" ;;
@@ -230,9 +212,6 @@ case "$PROCESSED_VALUE" in
     "REFERENCE:"*) TYPE_LABEL="reference" ;;
     *) TYPE_LABEL="unknown" ;;
 esac
-
-# Register the variable type
-register_variable_type "$VAR_NAME" "$TYPE_LABEL" "$VAR_VALUE"
 
 # Generate assembly data
 ASSEMBLY_DATA=$(generate_assembly_for_primitive "$VAR_NAME" "$PROCESSED_VALUE" "$TYPE_LABEL")
@@ -279,4 +258,3 @@ mv "$TEMP_FILE" "$OUTPUT_FILE"
 echo "Successfully added variable declaration to $OUTPUT_FILE"
 echo "Variable: $VAR_NAME = $VAR_VALUE"
 echo "Type: $TYPE_LABEL"
-echo "Registered in: $SCRIPT_DIR/$TYPE_REGISTRY"

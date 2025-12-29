@@ -72,42 +72,43 @@ determine_type() {
         for part in "${PARTS[@]}"; do
             part=$(echo "$part" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
             # If any part contains letters or is not a valid number, it's a string
-            if [[ "$part" =~ [a-zA-Z_] ]] || ! [[ "$part" =~ ^-?[0-9]+$ ]]; then
+            if [[ "$part" =~ [a-zA-Z_] ]] || ! [[ "$part" =~ ^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$ ]]; then
                 echo "string"
                 return
             fi
         done
-        # All parts are numbers, so it's an arithmetic expression (integer)
+        # All parts are numbers, so it's an arithmetic expression
         echo "number"
         return
     fi
     
-    # Check for arithmetic expressions without concatenation (only - * / %)
+    # Check for arithmetic expressions (only - * / %)
     if [[ "$value" =~ [\-\*/%] ]]; then
         # Remove all spaces and check if it's a valid arithmetic expression
         local clean_val=$(echo "$value" | sed 's/[[:space:]]//g')
         # Check if it matches pattern: number operator number (operator number)*
-        if [[ "$clean_val" =~ ^-?[0-9]+([\-\*/%][0-9]+)*$ ]]; then
+        # Now includes decimal points and scientific notation
+        if [[ "$clean_val" =~ ^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?([\-\*/%][0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?)*$ ]]; then
             echo "number"
             return
         fi
     fi
     
-    # Check for pure number (integer or float) - no operators
+    # Check for pure number (any numeric format) - no operators
     # Check for hexadecimal
-    if [[ "$value" =~ ^0[xX][0-9a-fA-F]+$ ]]; then
+    if [[ "$value" =~ ^-?0[xX][0-9a-fA-F]+$ ]]; then
         echo "number"
         return
     fi
     
     # Check for octal
-    if [[ "$value" =~ ^0[0-7]+$ ]]; then
+    if [[ "$value" =~ ^-?0[0-7]+$ ]]; then
         echo "number"
         return
     fi
     
     # Check for binary
-    if [[ "$value" =~ ^0[bB][01]+$ ]]; then
+    if [[ "$value" =~ ^-?0[bB][01]+$ ]]; then
         echo "number"
         return
     fi
@@ -118,9 +119,12 @@ determine_type() {
         return
     fi
     
-    # Check for float
-    if [[ "$value" =~ ^-?[0-9]+\.[0-9]+$ ]] || [[ "$value" =~ ^-?[0-9]+\.[0-9]*[eE][-+]?[0-9]+$ ]] || [[ "$value" =~ ^-?[0-9]*\.[0-9]+[eE]?[-+]?[0-9]*$ ]]; then
-        echo "float"
+    # Check for float/decimal (including scientific notation)
+    if [[ "$value" =~ ^-?[0-9]+\.[0-9]+$ ]] || 
+       [[ "$value" =~ ^-?[0-9]+\.[0-9]*[eE][-+]?[0-9]+$ ]] || 
+       [[ "$value" =~ ^-?[0-9]*\.[0-9]+$ ]] ||
+       [[ "$value" =~ ^-?[0-9]+[eE][-+]?[0-9]+$ ]]; then
+        echo "number"
         return
     fi
     
@@ -165,18 +169,18 @@ case "$TYPE" in
         fi
         ;;
     "number")
-        if [ -f "./simple/integer.sh" ]; then
-            bash "./simple/integer.sh"
+        if [ -f "./simple/number.sh" ]; then
+            bash "./simple/number.sh"
             EXIT_CODE=$?
             if [ $EXIT_CODE -eq 0 ]; then
                 echo "Successfully processed number variable"
                 exit 0
             else
-                echo "Error: integer.sh failed with exit code $EXIT_CODE"
+                echo "Error: number.sh failed with exit code $EXIT_CODE"
                 exit $EXIT_CODE
             fi
         else
-            echo "Error: integer.sh not found in ./simple/"
+            echo "Error: number.sh not found in ./simple/"
             exit 1
         fi
         ;;
@@ -225,22 +229,6 @@ case "$TYPE" in
             fi
         else
             echo "Error: undefined.sh not found in ./simple/"
-            exit 1
-        fi
-        ;;
-    "float")
-        if [ -f "./simple/float.sh" ]; then
-            bash "./simple/float.sh"
-            EXIT_CODE=$?
-            if [ $EXIT_CODE -eq 0 ]; then
-                echo "Successfully processed float variable"
-                exit 0
-            else
-                echo "Error: float.sh failed with exit code $EXIT_CODE"
-                exit $EXIT_CODE
-            fi
-        else
-            echo "Error: float.sh not found in ./simple/"
             exit 1
         fi
         ;;

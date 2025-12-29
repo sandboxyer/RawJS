@@ -31,10 +31,62 @@ fi
 export VAR_NAME
 export VAR_VALUE
 
-# Function to check if string is a number
-is_number() {
+# Function to check if a string looks like a pure arithmetic expression
+is_arithmetic_expression() {
+    local value="$1"
+    
+    # Trim whitespace
+    value=$(echo "$value" | sed 's/[[:space:]]//g')
+    
+    # Must contain only numbers and arithmetic operators + - * / %
+    if [[ "$value" =~ ^[-]?[0-9]+([-+*/%][0-9]+)*$ ]]; then
+        return 0
+    fi
+    
+    # Check for hexadecimal arithmetic
+    if [[ "$value" =~ ^[-]?0[xX][0-9a-fA-F]+([-+*/%]0[xX][0-9a-fA-F]+)*$ ]]; then
+        return 0
+    fi
+    
+    # Check for octal arithmetic
+    if [[ "$value" =~ ^[-]?0[0-7]+([-+*/%]0[0-7]+)*$ ]]; then
+        return 0
+    fi
+    
+    # Check for binary arithmetic
+    if [[ "$value" =~ ^[-]?0[bB][01]+([-+*/%]0[bB][01]+)*$ ]]; then
+        return 0
+    fi
+    
+    # Mixed numeric types arithmetic
+    if [[ "$value" =~ ^[-]?[0-9bx0-9a-fA-F]+([-+*/%][0-9bx0-9a-fA-F]+)*$ ]]; then
+        # Additional validation - all tokens must be valid numbers
+        # Split by operators and validate each part
+        local clean_expr=$(echo "$value" | sed 's/[-+*/%]/ /g')
+        read -ra PARTS <<< "$clean_expr"
+        
+        for part in "${PARTS[@]}"; do
+            # Check each part is a valid number
+            if [[ ! "$part" =~ ^-?[0-9]+$ ]] && \
+               [[ ! "$part" =~ ^-?0[xX][0-9a-fA-F]+$ ]] && \
+               [[ ! "$part" =~ ^-?0[0-7]+$ ]] && \
+               [[ ! "$part" =~ ^-?0[bB][01]+$ ]]; then
+                return 1
+            fi
+        done
+        return 0
+    fi
+    
+    return 1
+}
+
+# Function to check if string is a simple number
+is_simple_number() {
     local str="$1"
-    if [[ "$str" =~ ^-?[0-9]+$ ]] || [[ "$str" =~ ^-?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$ ]]; then
+    if [[ "$str" =~ ^-?[0-9]+$ ]] || \
+       [[ "$str" =~ ^-?0[xX][0-9a-fA-F]+$ ]] || \
+       [[ "$str" =~ ^-?0[0-7]+$ ]] || \
+       [[ "$str" =~ ^-?0[bB][01]+$ ]]; then
         return 0
     else
         return 1
@@ -48,6 +100,11 @@ is_simple_type() {
     # Trim whitespace
     value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     
+    # Check for arithmetic expressions first
+    if is_arithmetic_expression "$value"; then
+        return 0
+    fi
+    
     # Check for null/undefined
     if [ "$value" = "null" ] || [ "$value" = "undefined" ]; then
         return 0
@@ -58,8 +115,8 @@ is_simple_type() {
         return 0
     fi
     
-    # Check for number
-    if is_number "$value"; then
+    # Check for simple number
+    if is_simple_number "$value"; then
         return 0
     fi
     
@@ -68,8 +125,21 @@ is_simple_type() {
         return 0
     fi
     
+    # Check for string concatenation with quotes
+    if [[ "$value" =~ [\"\'] ]]; then
+        # Contains quotes anywhere, treat as string expression
+        return 0
+    fi
+    
     # Check for reference to another variable (simple identifier)
     if [[ "$value" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+        return 0
+    fi
+    
+    # Check for expressions with variables (e.g., a + b)
+    if [[ "$value" =~ [+\-*/%] ]]; then
+        # Contains operators but no quotes, could be mixed variable/numbers
+        # For now, treat as simple (will be handled by the simple.sh type detector)
         return 0
     fi
     
@@ -86,6 +156,17 @@ is_array_type() {
     # Must start with [ and end with ]
     if [[ ! "$value" =~ ^\[.*\]$ ]]; then
         return 1
+    fi
+    
+    # Check for arithmetic expressions in brackets (they're not arrays)
+    if [[ "$value" =~ ^\[[0-9]+\]$ ]] || [[ "$value" =~ ^\[[0-9bx0-9a-fA-F]+([-+*/%][0-9bx0-9a-fA-F]+)*\]$ ]]; then
+        # This is likely a single number or arithmetic in brackets, not an array
+        # Check if it contains only numbers and operators
+        local content="${value:1:${#value}-2}"
+        if is_arithmetic_expression "$content" || is_simple_number "$content"; then
+            # This is just a number/expression in brackets, treat as simple
+            return 1
+        fi
     fi
     
     # Get content inside brackets

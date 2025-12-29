@@ -57,37 +57,80 @@ determine_type() {
         return
     fi
     
-    # Check for string (starts and ends with quotes OR contains concatenation)
-    if [[ "$value" =~ ^\"([^\"]*)\"$ ]] || \
-       [[ "$value" =~ ^\'([^\']*)\'$ ]] || \
-       [[ "$value" =~ .*[\"\'].*[\"\'] ]] || \
-       [[ "$value" =~ .*[\+\"\'][[:space:]]*[\"\'] ]] || \
-       [[ "$value" =~ [\+\"\'][[:space:]]*[a-zA-Z0-9_]*[[:space:]]*[\"\'] ]]; then
+    # FIRST: Check for string (most specific checks first)
+    # If it contains quotes at all, it's definitely a string
+    if [[ "$value" =~ [\"\'] ]]; then
         echo "string"
         return
     fi
     
-    # Check for number (integer or float)
-    if [[ "$value" =~ ^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$ ]] && [[ ! "$value" =~ ^-?0[0-9]+ ]]; then
-        # Check if it has a decimal point or scientific notation
-        if [[ "$value" =~ \. ]] || [[ "$value" =~ [eE] ]]; then
-            if [[ "$value" =~ ^-?[0-9]*\.[0-9]+$ ]] || [[ "$value" =~ ^-?[0-9]+\.?[0-9]*[eE][-+]?[0-9]+$ ]]; then
-                echo "float"
+    # Check for concatenation with + (string concatenation)
+    # If it contains + and non-numeric content, it's a string
+    if [[ "$value" =~ \+ ]]; then
+        # Split by + to check each part
+        IFS='+' read -ra PARTS <<< "$value"
+        for part in "${PARTS[@]}"; do
+            part=$(echo "$part" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            # If any part contains letters or is not a valid number, it's a string
+            if [[ "$part" =~ [a-zA-Z_] ]] || ! [[ "$part" =~ ^-?[0-9]+$ ]]; then
+                echo "string"
                 return
             fi
-        fi
-        
+        done
+        # All parts are numbers, so it's an arithmetic expression (integer)
         echo "number"
         return
     fi
     
-    # Check for variable reference
+    # Check for arithmetic expressions without concatenation (only - * / %)
+    if [[ "$value" =~ [\-\*/%] ]]; then
+        # Remove all spaces and check if it's a valid arithmetic expression
+        local clean_val=$(echo "$value" | sed 's/[[:space:]]//g')
+        # Check if it matches pattern: number operator number (operator number)*
+        if [[ "$clean_val" =~ ^-?[0-9]+([\-\*/%][0-9]+)*$ ]]; then
+            echo "number"
+            return
+        fi
+    fi
+    
+    # Check for pure number (integer or float) - no operators
+    # Check for hexadecimal
+    if [[ "$value" =~ ^0[xX][0-9a-fA-F]+$ ]]; then
+        echo "number"
+        return
+    fi
+    
+    # Check for octal
+    if [[ "$value" =~ ^0[0-7]+$ ]]; then
+        echo "number"
+        return
+    fi
+    
+    # Check for binary
+    if [[ "$value" =~ ^0[bB][01]+$ ]]; then
+        echo "number"
+        return
+    fi
+    
+    # Check for decimal integer
+    if [[ "$value" =~ ^-?[0-9]+$ ]]; then
+        echo "number"
+        return
+    fi
+    
+    # Check for float
+    if [[ "$value" =~ ^-?[0-9]+\.[0-9]+$ ]] || [[ "$value" =~ ^-?[0-9]+\.[0-9]*[eE][-+]?[0-9]+$ ]] || [[ "$value" =~ ^-?[0-9]*\.[0-9]+[eE]?[-+]?[0-9]*$ ]]; then
+        echo "float"
+        return
+    fi
+    
+    # Check for variable reference (single identifier)
     if [[ "$value" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
         echo "reference"
         return
     fi
     
-    # Default to string for any complex expression
+    # Default to string for anything else
     echo "string"
 }
 
@@ -121,7 +164,7 @@ case "$TYPE" in
             exit 1
         fi
         ;;
-    "number"|"integer")
+    "number")
         if [ -f "./simple/integer.sh" ]; then
             bash "./simple/integer.sh"
             EXIT_CODE=$?

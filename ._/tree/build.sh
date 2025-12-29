@@ -3,6 +3,7 @@
 # build.sh - Optimized version with single-pass processing
 # Added execution time tracking with --silent option
 # Added support for .sh files in addition to .asm and binaries
+# Added --verbose mode to show full logs including nested executions
 
 # Set strict mode for better error handling
 set -euo pipefail
@@ -18,6 +19,9 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
 NC='\033[0m' # No Color
 
 # Initialize counters
@@ -29,13 +33,18 @@ START_TIME=0
 TOTAL_CREATION_TIME=0
 TOTAL_EXECUTION_TIME=0
 
-# Silent mode flag
+# Output mode flags
 SILENT_MODE=false
+VERBOSE_MODE=false
 
 # Buffer for accumulating content
 declare -a TAG_BUFFER=()
 CURRENT_TAG=""
 CURRENT_CONTENT=""
+
+# Execution depth tracking for verbose mode
+EXECUTION_DEPTH=0
+EXECUTION_PATH=()
 
 # Function to get current timestamp in milliseconds
 get_timestamp_ms() {
@@ -55,22 +64,95 @@ format_duration() {
     fi
 }
 
-# Function to log messages (respects silent mode)
+# Function to get indentation based on execution depth
+get_indent() {
+    local depth=$1
+    local indent=""
+    for ((i=0; i<depth; i++)); do
+        indent+="  "
+    done
+    echo "$indent"
+}
+
+# Function to log messages based on mode
 log_info() {
     if [[ "$SILENT_MODE" == false ]]; then
-        echo -e "${GREEN}[INFO]${NC} $1"
+        local indent=$(get_indent $EXECUTION_DEPTH)
+        echo -e "${GREEN}[INFO]${NC} ${indent}$1"
     fi
 }
 
 log_warn() {
     if [[ "$SILENT_MODE" == false ]]; then
-        echo -e "${YELLOW}[WARN]${NC} $1"
+        local indent=$(get_indent $EXECUTION_DEPTH)
+        echo -e "${YELLOW}[WARN]${NC} ${indent}$1"
     fi
 }
 
 log_error() {
     # Always show errors
-    echo -e "${RED}[ERROR]${NC} $1" >&2
+    local indent=$(get_indent $EXECUTION_DEPTH)
+    echo -e "${RED}[ERROR]${NC} ${indent}$1" >&2
+}
+
+# Function for verbose logging (only in verbose mode)
+log_verbose() {
+    if [[ "$VERBOSE_MODE" == true ]]; then
+        local indent=$(get_indent $EXECUTION_DEPTH)
+        echo -e "${CYAN}[VERBOSE]${NC} ${indent}$1"
+    fi
+}
+
+# Function for debug logging (only in verbose mode, more detailed)
+log_debug() {
+    if [[ "$VERBOSE_MODE" == true ]]; then
+        local indent=$(get_indent $EXECUTION_DEPTH)
+        echo -e "${PURPLE}[DEBUG]${NC} ${indent}$1"
+    fi
+}
+
+# Function to show execution header in verbose mode
+log_execution_start() {
+    if [[ "$VERBOSE_MODE" == true ]]; then
+        local indent=$(get_indent $EXECUTION_DEPTH)
+        echo -e "${WHITE}════════════════════════════════════════${NC}"
+        echo -e "${WHITE}[EXECUTION START]${NC} ${indent}$1"
+        if [[ $EXECUTION_DEPTH -gt 0 ]]; then
+            echo -e "${WHITE}[CALL PATH]${NC} ${indent}${EXECUTION_PATH[-1]}"
+        fi
+    fi
+}
+
+# Function to show execution footer in verbose mode
+log_execution_end() {
+    if [[ "$VERBOSE_MODE" == true ]]; then
+        local indent=$(get_indent $EXECUTION_DEPTH)
+        local status=$1
+        local duration=$2
+        
+        if [[ $status -eq 0 ]]; then
+            echo -e "${GREEN}[EXECUTION END]${NC} ${indent}Success ($(format_duration $duration))"
+        else
+            echo -e "${RED}[EXECUTION END]${NC} ${indent}Failed with exit code: $status ($(format_duration $duration))"
+        fi
+        echo -e "${WHITE}════════════════════════════════════════${NC}"
+        echo ""
+    fi
+}
+
+# Function to show file content in verbose mode
+log_file_content() {
+    if [[ "$VERBOSE_MODE" == true ]]; then
+        local indent=$(get_indent $EXECUTION_DEPTH)
+        local file_path="$1"
+        local content="$2"
+        
+        echo -e "${CYAN}[FILE CONTENT]${NC} ${indent}File: $file_path"
+        echo -e "${CYAN}[CONTENT]${NC} ${indent}$(echo "$content" | head -5 | sed "s/^/${indent}/")"
+        if [[ $(echo "$content" | wc -l) -gt 5 ]]; then
+            echo -e "${CYAN}[...]${NC} ${indent}... (truncated)"
+        fi
+    fi
 }
 
 # Function to check if content is a declaration
@@ -150,6 +232,8 @@ create_temp_file() {
         if [[ "$SILENT_MODE" == false ]]; then
             log_info "Created file: $file_path ($(format_duration $creation_duration))"
         fi
+        log_verbose "File created: $file_path (size: ${#content} bytes, time: $(format_duration $creation_duration))"
+        log_file_content "$file_path" "$content"
         return 0
     else
         log_error "Failed to create file: $file_path ($(format_duration $creation_duration))"
@@ -157,11 +241,18 @@ create_temp_file() {
     fi
 }
 
-# Function to execute basm.sh for .asm files
+# Function to execute basm.sh for .asm files with verbose output
 execute_basm() {
     local input_file="$1"
     local asm_file="$2"
     local execution_start_time=0
+    local output_file="${asm_file%.asm}_output.txt"
+    
+    # Push to execution path
+    EXECUTION_PATH+=("basm:$asm_file")
+    EXECUTION_DEPTH=$((EXECUTION_DEPTH + 1))
+    
+    log_execution_start "bash $BASH_RUNNER $asm_file"
     
     if [[ "$SILENT_MODE" == false ]]; then
         log_info "Executing: bash $BASH_RUNNER $asm_file"
@@ -170,22 +261,59 @@ execute_basm() {
     # Record execution start time
     execution_start_time=$(get_timestamp_ms)
     
-    # Execute with bash command and wait for completion
-    if bash "$BASH_RUNNER" "$asm_file" >/dev/null 2>&1; then
-        local execution_end_time=$(get_timestamp_ms)
-        local execution_duration=$((execution_end_time - execution_start_time))
-        TOTAL_EXECUTION_TIME=$((TOTAL_EXECUTION_TIME + execution_duration))
+    # Execute with appropriate output redirection based on mode
+    local exit_code=0
+    
+    if [[ "$VERBOSE_MODE" == true ]]; then
+        log_debug "Running basm with verbose output capture..."
         
+        # Capture and display all output in verbose mode
+        {
+            echo "=== BASH RUNNER OUTPUT ==="
+            bash "$BASH_RUNNER" "$asm_file" 2>&1
+            exit_code=$?
+            echo "=== EXIT CODE: $exit_code ==="
+        } | tee "$output_file" | while IFS= read -r line; do
+            local indent=$(get_indent $EXECUTION_DEPTH)
+            echo -e "${CYAN}[BASM OUTPUT]${NC} ${indent}$line"
+        done
+        
+        # Also show the output file content
+        if [[ -f "$output_file" ]]; then
+            log_debug "Full output saved to: $output_file"
+            if [[ $(wc -l < "$output_file") -gt 0 ]]; then
+                log_debug "Output file content (first 20 lines):"
+                head -20 "$output_file" | while IFS= read -r line; do
+                    local indent=$(get_indent $EXECUTION_DEPTH)
+                    echo -e "${PURPLE}[OUTPUT]${NC} ${indent}$line"
+                done
+            fi
+        fi
+    else
+        # Standard execution (silent or normal mode)
+        if bash "$BASH_RUNNER" "$asm_file" >/dev/null 2>&1; then
+            exit_code=0
+        else
+            exit_code=$?
+        fi
+    fi
+    
+    local execution_end_time=$(get_timestamp_ms)
+    local execution_duration=$((execution_end_time - execution_start_time))
+    TOTAL_EXECUTION_TIME=$((TOTAL_EXECUTION_TIME + execution_duration))
+    
+    log_execution_end $exit_code $execution_duration
+    
+    # Pop from execution path
+    EXECUTION_DEPTH=$((EXECUTION_DEPTH - 1))
+    unset EXECUTION_PATH[-1]
+    
+    if [[ $exit_code -eq 0 ]]; then
         if [[ "$SILENT_MODE" == false ]]; then
             log_info "Execution completed successfully ($(format_duration $execution_duration))"
         fi
         return 0
     else
-        local exit_code=$?
-        local execution_end_time=$(get_timestamp_ms)
-        local execution_duration=$((execution_end_time - execution_start_time))
-        TOTAL_EXECUTION_TIME=$((TOTAL_EXECUTION_TIME + execution_duration))
-        
         if [[ "$SILENT_MODE" == false ]]; then
             log_error "Execution failed with exit code: $exit_code ($(format_duration $execution_duration))"
         fi
@@ -193,14 +321,21 @@ execute_basm() {
     fi
 }
 
-# Function to execute binary files directly
+# Function to execute binary files directly with verbose output
 execute_binary() {
     local input_file="$1"
     local binary_file="$2"
     local execution_start_time=0
+    local output_file="${binary_file}_output.txt"
     
     # Make sure binary is executable
     chmod +x "$binary_file" 2>/dev/null || true
+    
+    # Push to execution path
+    EXECUTION_PATH+=("binary:$binary_file")
+    EXECUTION_DEPTH=$((EXECUTION_DEPTH + 1))
+    
+    log_execution_start "Direct binary execution: $binary_file"
     
     if [[ "$SILENT_MODE" == false ]]; then
         log_info "Executing binary directly: $binary_file"
@@ -209,22 +344,59 @@ execute_binary() {
     # Record execution start time
     execution_start_time=$(get_timestamp_ms)
     
-    # Execute binary directly and wait for completion
-    if "$binary_file" >/dev/null 2>&1; then
-        local execution_end_time=$(get_timestamp_ms)
-        local execution_duration=$((execution_end_time - execution_start_time))
-        TOTAL_EXECUTION_TIME=$((TOTAL_EXECUTION_TIME + execution_duration))
+    # Execute with appropriate output redirection based on mode
+    local exit_code=0
+    
+    if [[ "$VERBOSE_MODE" == true ]]; then
+        log_debug "Running binary with verbose output capture..."
         
+        # Capture and display all output in verbose mode
+        {
+            echo "=== BINARY OUTPUT ==="
+            "$binary_file" 2>&1
+            exit_code=$?
+            echo "=== EXIT CODE: $exit_code ==="
+        } | tee "$output_file" | while IFS= read -r line; do
+            local indent=$(get_indent $EXECUTION_DEPTH)
+            echo -e "${CYAN}[BINARY OUTPUT]${NC} ${indent}$line"
+        done
+        
+        # Also show the output file content
+        if [[ -f "$output_file" ]]; then
+            log_debug "Full output saved to: $output_file"
+            if [[ $(wc -l < "$output_file") -gt 0 ]]; then
+                log_debug "Output file content (first 20 lines):"
+                head -20 "$output_file" | while IFS= read -r line; do
+                    local indent=$(get_indent $EXECUTION_DEPTH)
+                    echo -e "${PURPLE}[OUTPUT]${NC} ${indent}$line"
+                done
+            fi
+        fi
+    else
+        # Standard execution (silent or normal mode)
+        if "$binary_file" >/dev/null 2>&1; then
+            exit_code=0
+        else
+            exit_code=$?
+        fi
+    fi
+    
+    local execution_end_time=$(get_timestamp_ms)
+    local execution_duration=$((execution_end_time - execution_start_time))
+    TOTAL_EXECUTION_TIME=$((TOTAL_EXECUTION_TIME + execution_duration))
+    
+    log_execution_end $exit_code $execution_duration
+    
+    # Pop from execution path
+    EXECUTION_DEPTH=$((EXECUTION_DEPTH - 1))
+    unset EXECUTION_PATH[-1]
+    
+    if [[ $exit_code -eq 0 ]]; then
         if [[ "$SILENT_MODE" == false ]]; then
             log_info "Binary execution completed successfully ($(format_duration $execution_duration))"
         fi
         return 0
     else
-        local exit_code=$?
-        local execution_end_time=$(get_timestamp_ms)
-        local execution_duration=$((execution_end_time - execution_start_time))
-        TOTAL_EXECUTION_TIME=$((TOTAL_EXECUTION_TIME + execution_duration))
-        
         if [[ "$SILENT_MODE" == false ]]; then
             log_error "Binary execution failed with exit code: $exit_code ($(format_duration $execution_duration))"
         fi
@@ -232,14 +404,21 @@ execute_binary() {
     fi
 }
 
-# Function to execute .sh files directly with bash
+# Function to execute .sh files directly with bash and verbose output
 execute_sh() {
     local input_file="$1"
     local sh_file="$2"
     local execution_start_time=0
+    local output_file="${sh_file%.sh}_output.txt"
     
     # Make sure shell script is executable
     chmod +x "$sh_file" 2>/dev/null || true
+    
+    # Push to execution path
+    EXECUTION_PATH+=("sh:$sh_file")
+    EXECUTION_DEPTH=$((EXECUTION_DEPTH + 1))
+    
+    log_execution_start "bash $sh_file"
     
     if [[ "$SILENT_MODE" == false ]]; then
         log_info "Executing shell script: bash $sh_file"
@@ -248,22 +427,71 @@ execute_sh() {
     # Record execution start time
     execution_start_time=$(get_timestamp_ms)
     
-    # Execute shell script with bash and wait for completion
-    if bash "$sh_file" >/dev/null 2>&1; then
-        local execution_end_time=$(get_timestamp_ms)
-        local execution_duration=$((execution_end_time - execution_start_time))
-        TOTAL_EXECUTION_TIME=$((TOTAL_EXECUTION_TIME + execution_duration))
+    # Execute with appropriate output redirection based on mode
+    local exit_code=0
+    
+    if [[ "$VERBOSE_MODE" == true ]]; then
+        log_debug "Running shell script with verbose output capture..."
         
+        # Show script content in verbose mode
+        if [[ -f "$sh_file" ]]; then
+            log_debug "Shell script content (first 10 lines):"
+            head -10 "$sh_file" | while IFS= read -r line; do
+                local indent=$(get_indent $EXECUTION_DEPTH)
+                echo -e "${PURPLE}[SCRIPT]${NC} ${indent}$line"
+            done
+            if [[ $(wc -l < "$sh_file") -gt 10 ]]; then
+                log_debug "... (script continues)"
+            fi
+        fi
+        
+        # Capture and display all output in verbose mode
+        {
+            echo "=== SHELL SCRIPT OUTPUT ==="
+            bash "$sh_file" 2>&1
+            exit_code=$?
+            echo "=== EXIT CODE: $exit_code ==="
+        } | tee "$output_file" | while IFS= read -r line; do
+            local indent=$(get_indent $EXECUTION_DEPTH)
+            echo -e "${CYAN}[SH OUTPUT]${NC} ${indent}$line"
+        done
+        
+        # Also show the output file content
+        if [[ -f "$output_file" ]]; then
+            log_debug "Full output saved to: $output_file"
+            if [[ $(wc -l < "$output_file") -gt 0 ]]; then
+                log_debug "Output file content (first 20 lines):"
+                head -20 "$output_file" | while IFS= read -r line; do
+                    local indent=$(get_indent $EXECUTION_DEPTH)
+                    echo -e "${PURPLE}[OUTPUT]${NC} ${indent}$line"
+                done
+            fi
+        fi
+    else
+        # Standard execution (silent or normal mode)
+        if bash "$sh_file" >/dev/null 2>&1; then
+            exit_code=0
+        else
+            exit_code=$?
+        fi
+    fi
+    
+    local execution_end_time=$(get_timestamp_ms)
+    local execution_duration=$((execution_end_time - execution_start_time))
+    TOTAL_EXECUTION_TIME=$((TOTAL_EXECUTION_TIME + execution_duration))
+    
+    log_execution_end $exit_code $execution_duration
+    
+    # Pop from execution path
+    EXECUTION_DEPTH=$((EXECUTION_DEPTH - 1))
+    unset EXECUTION_PATH[-1]
+    
+    if [[ $exit_code -eq 0 ]]; then
         if [[ "$SILENT_MODE" == false ]]; then
             log_info "Shell script execution completed successfully ($(format_duration $execution_duration))"
         fi
         return 0
     else
-        local exit_code=$?
-        local execution_end_time=$(get_timestamp_ms)
-        local execution_duration=$((execution_end_time - execution_start_time))
-        TOTAL_EXECUTION_TIME=$((TOTAL_EXECUTION_TIME + execution_duration))
-        
         if [[ "$SILENT_MODE" == false ]]; then
             log_error "Shell script execution failed with exit code: $exit_code ($(format_duration $execution_duration))"
         fi
@@ -279,6 +507,9 @@ handle_js_content() {
         log_info "Processing JS content: ${content:0:50}..."
     fi
     
+    log_verbose "Processing JS content (length: ${#content} chars)"
+    log_debug "Content preview: ${content:0:100}..."
+    
     # Step 1: Check for declarations
     local declaration_type
     declaration_type=$(is_declaration "$content")
@@ -289,6 +520,8 @@ handle_js_content() {
             log_info "Processing declaration: $declaration_type"
         fi
         
+        log_verbose "Detected declaration type: $declaration_type"
+        
         # Create declaration file with _input suffix
         local input_file="${JS_DIR}${declaration_type}_input"
         local base_file="${JS_DIR}${declaration_type}"
@@ -296,6 +529,8 @@ handle_js_content() {
         if create_temp_file "$input_file" "$content"; then
             local file_type
             file_type=$(check_executable_exists "$base_file")
+            
+            log_verbose "Executable type found: $file_type"
             
             case "$file_type" in
                 "binary")
@@ -338,6 +573,8 @@ handle_js_content() {
     method_name=$(parse_method_name "$content")
     
     if [[ -n "$method_name" ]]; then
+        log_verbose "Parsed method name: $method_name"
+        
         # Handle dot notation
         local parts
         IFS='.' read -ra parts <<< "$method_name"
@@ -358,6 +595,8 @@ handle_js_content() {
             file_name="${parts[-1]}"
         fi
         
+        log_verbose "Resolved path: $dir_path, file: $file_name"
+        
         # Create input file with _input suffix
         local input_file="${dir_path}${file_name}_input"
         local base_file="${dir_path}${file_name}"
@@ -368,6 +607,9 @@ handle_js_content() {
         
         local file_type
         file_type=$(check_executable_exists "$base_file")
+        
+        log_verbose "Found executable type: $file_type"
+        
         if [[ -n "$file_type" ]]; then
             if create_temp_file "$input_file" "$content"; then
                 case "$file_type" in
@@ -406,6 +648,8 @@ handle_js_content() {
         log_warn "No specific handler found, using fallback"
     fi
     
+    log_verbose "Using fallback handler for content"
+    
     # Create fallback input file with _input suffix
     local input_file="${JS_DIR}call_input"
     local base_file="${JS_DIR}call"
@@ -413,6 +657,8 @@ handle_js_content() {
     if create_temp_file "$input_file" "$content"; then
         local file_type
         file_type=$(check_executable_exists "$base_file")
+        
+        log_verbose "Fallback executable type: $file_type"
         
         case "$file_type" in
             "binary")
@@ -454,6 +700,9 @@ handle_chain_block() {
         log_info "Processing chain block (length: ${#content})"
     fi
     
+    log_verbose "Processing chain block (length: ${#content} chars)"
+    log_debug "Chain block preview: ${content:0:100}..."
+    
     # Create chain input file with _input suffix
     local input_file="${CHAIN_DIR}chain_input"
     local base_file="${CHAIN_DIR}chain"
@@ -461,6 +710,8 @@ handle_chain_block() {
     if create_temp_file "$input_file" "$content"; then
         local file_type
         file_type=$(check_executable_exists "$base_file")
+        
+        log_verbose "Chain executable type: $file_type"
         
         case "$file_type" in
             "binary")
@@ -503,6 +754,8 @@ process_buffered_content() {
     content=$(echo "$content" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     
     if [[ -n "$content" ]]; then
+        log_verbose "Processing buffered content for tag: $tag (length: ${#content})"
+        
         case "$tag" in
             "<js-start>")
                 handle_js_content "$content"
@@ -524,6 +777,15 @@ main() {
     START_TIME=$(get_timestamp_ms)
     
     if [[ "$SILENT_MODE" == false ]]; then
+        if [[ "$VERBOSE_MODE" == true ]]; then
+            log_debug "Verbose mode enabled - showing detailed execution logs"
+            log_debug "Script PID: $$"
+            log_debug "Current directory: $(pwd)"
+            log_debug "Using BASH_RUNNER: $BASH_RUNNER"
+            log_debug "ARCH_OUTPUT: $ARCH_OUTPUT"
+            echo ""
+        fi
+        
         log_info "Starting build process..."
         log_info "Reading from: $ARCH_OUTPUT"
     fi
@@ -551,7 +813,11 @@ main() {
     local chain_buffer=""
     local in_chain=0
     
+    log_verbose "Starting to parse $ARCH_OUTPUT"
+    
     while IFS= read -r line; do
+        log_debug "Processing line: ${line:0:50}..."
+        
         # If we're inside a chain block, buffer everything
         if [[ $in_chain -eq 1 ]]; then
             chain_buffer+="$line"$'\n'
@@ -559,12 +825,15 @@ main() {
             # Check for chain tags in this line
             if [[ "$line" == *"<chain-start>"* ]]; then
                 ((chain_depth++))
+                log_debug "Nested chain-start detected, depth: $chain_depth"
             fi
             
             if [[ "$line" == *"<chain-end>"* ]]; then
                 ((chain_depth--))
+                log_debug "Chain-end detected, remaining depth: $chain_depth"
                 if [[ $chain_depth -eq 0 ]]; then
                     # End of chain block reached
+                    log_verbose "End of chain block reached, processing..."
                     handle_chain_block "$chain_buffer"
                     chain_buffer=""
                     in_chain=0
@@ -580,6 +849,7 @@ main() {
                 chain_buffer="$line"$'\n'
                 in_chain=1
                 chain_depth=1
+                log_verbose "Chain block started"
                 continue
             fi
         fi
@@ -592,6 +862,7 @@ main() {
                 in_tag=1
                 # Remove everything before the tag
                 line="${line#*<js-start>}"
+                log_debug "js-start tag found"
             fi
         fi
         
@@ -600,6 +871,7 @@ main() {
             if [[ "$line" == *"<js-end>"* ]]; then
                 # Add content before closing tag
                 CURRENT_CONTENT+="${line%<js-end>*}"
+                log_debug "js-end tag found, processing buffered content"
                 process_buffered_content
                 
                 # Continue with remaining part of line after closing tag
@@ -610,6 +882,7 @@ main() {
                         CURRENT_TAG="<js-start>"
                         in_tag=1
                         CURRENT_CONTENT="${remaining#*<js-start>}"
+                        log_debug "Another js-start found in same line"
                     else
                         in_tag=0
                     fi
@@ -626,12 +899,14 @@ main() {
                 CURRENT_TAG="<js-start>"
                 in_tag=1
                 CURRENT_CONTENT="${line#*<js-start>}"
+                log_debug "js-start tag found (outside of tag context)"
             fi
         fi
     done < "$ARCH_OUTPUT"
     
     # Handle any remaining buffered content
     if [[ -n "$CURRENT_CONTENT" && -n "$CURRENT_TAG" ]]; then
+        log_verbose "Processing remaining buffered content"
         process_buffered_content
     fi
     
@@ -654,6 +929,12 @@ main() {
     echo -e "${GREEN}[INFO]${NC} Script execution time: $(format_duration $TOTAL_EXECUTION_TIME)"
     echo -e "${GREEN}[INFO]${NC} Successfully processed: $processed_count"
     echo -e "${GREEN}[INFO]${NC} Errors encountered: $error_count"
+    
+    if [[ "$VERBOSE_MODE" == true ]]; then
+        echo -e "${GREEN}[INFO]${NC} Verbose mode was enabled"
+        echo -e "${GREEN}[INFO]${NC} Max execution depth reached: $EXECUTION_DEPTH"
+    fi
+    
     echo -e "${BLUE}========================================${NC}"
     
     if [[ $error_count -gt 0 ]]; then
@@ -665,11 +946,17 @@ main() {
 
 # Show usage information
 show_usage() {
-    echo "Usage: $0 [--silent]"
+    echo "Usage: $0 [--silent | --verbose | --help]"
     echo ""
     echo "Options:"
     echo "  --silent    Execute without verbose logging, only show final summary"
+    echo "  --verbose   Show detailed execution logs including all nested runs"
     echo "  -h, --help  Show this help message"
+    echo ""
+    echo "Output modes (mutually exclusive):"
+    echo "  Normal      : Shows basic info and warnings"
+    echo "  --silent    : Shows only errors and final summary"
+    echo "  --verbose   : Shows everything including nested execution output"
     echo ""
     exit 0
 }
@@ -679,7 +966,20 @@ parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
             --silent)
+                if [[ "$VERBOSE_MODE" == true ]]; then
+                    log_error "Cannot use --silent and --verbose together"
+                    show_usage
+                fi
                 SILENT_MODE=true
+                shift
+                ;;
+            --verbose)
+                if [[ "$SILENT_MODE" == true ]]; then
+                    log_error "Cannot use --silent and --verbose together"
+                    show_usage
+                fi
+                VERBOSE_MODE=true
+                SILENT_MODE=false  # Ensure verbose overrides silent
                 shift
                 ;;
             -h|--help)

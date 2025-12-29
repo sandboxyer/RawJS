@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # log.sh - Parses console.log() statements and converts them to assembly code
-# Enhanced version with proper variable type detection for all primitive types
+# Updated for the new print function that detects types
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -29,6 +29,44 @@ fi
 
 # Generate a unique label
 LOG_LABEL="log_$(date +%s%N | md5sum | cut -c1-8)"
+
+# Function to get variable type from registry
+get_variable_type() {
+    local var_name="$1"
+    
+    if [ ! -f "$TYPE_REGISTRY" ]; then
+        echo "unknown"
+        return
+    fi
+    
+    # Get the most recent entry for this variable
+    local type_info=$(grep "^$var_name:" "$TYPE_REGISTRY" | tail -1)
+    
+    if [ -z "$type_info" ]; then
+        echo "unknown"
+    else
+        echo "$type_info" | cut -d: -f2
+    fi
+}
+
+# Function to get variable value from registry
+get_variable_value() {
+    local var_name="$1"
+    
+    if [ ! -f "$TYPE_REGISTRY" ]; then
+        echo ""
+        return
+    fi
+    
+    local type_info=$(grep "^$var_name:" "$TYPE_REGISTRY" | tail -1)
+    
+    if [ -z "$type_info" ]; then
+        echo ""
+    else
+        # Get everything after the second colon
+        echo "$type_info" | cut -d: -f3-
+    fi
+}
 
 # Function to escape strings for NASM
 escape_for_nasm() {
@@ -72,44 +110,6 @@ escape_for_nasm() {
         echo "${result}, 0"
     else
         echo "0"
-    fi
-}
-
-# Function to get variable type from registry
-get_variable_type() {
-    local var_name="$1"
-    
-    if [ ! -f "$TYPE_REGISTRY" ]; then
-        echo "unknown"
-        return
-    fi
-    
-    # Get the most recent entry for this variable
-    local type_info=$(grep "^$var_name:" "$TYPE_REGISTRY" | tail -1)
-    
-    if [ -z "$type_info" ]; then
-        echo "unknown"
-    else
-        echo "$type_info" | cut -d: -f2
-    fi
-}
-
-# Function to get variable value from registry
-get_variable_value() {
-    local var_name="$1"
-    
-    if [ ! -f "$TYPE_REGISTRY" ]; then
-        echo ""
-        return
-    fi
-    
-    local type_info=$(grep "^$var_name:" "$TYPE_REGISTRY" | tail -1)
-    
-    if [ -z "$type_info" ]; then
-        echo ""
-    else
-        # Get everything after the second colon
-        echo "$type_info" | cut -d: -f3-
     fi
 }
 
@@ -159,9 +159,6 @@ generate_string_constants() {
     for i in "${!args_array[@]}"; do
         local arg="${args_array[$i]}"
         
-        # Remove surrounding quotes for processing
-        local processed_arg="$arg"
-        
         # Check what type of argument this is
         case "$arg" in
             # Boolean values
@@ -201,9 +198,6 @@ generate_string_constants() {
                         local var_type=$(get_variable_type "$arg")
                         
                         case "$var_type" in
-                            "string")
-                                # String variables don't need extra constants
-                                ;;
                             "float")
                                 # Create a string representation of the float
                                 local float_value=$(get_variable_value "$arg")
@@ -228,27 +222,32 @@ generate_assembly_for_arg() {
     case "$arg" in
         # Boolean literals
         "true")
-            echo "    mov rsi, ${LOG_LABEL}_bool${arg_index}"
-            echo "    call print_str"
+            echo "    mov rax, ${LOG_LABEL}_bool${arg_index}"
+            echo "    mov rdx, TYPE_STRING"
+            echo "    call print"
             ;;
         "false")
-            echo "    mov rsi, ${LOG_LABEL}_bool${arg_index}"
-            echo "    call print_str"
+            echo "    mov rax, ${LOG_LABEL}_bool${arg_index}"
+            echo "    mov rdx, TYPE_STRING"
+            echo "    call print"
             ;;
         # Null literal
         "null")
-            echo "    mov rsi, ${LOG_LABEL}_null${arg_index}"
-            echo "    call print_str"
+            echo "    mov rax, ${LOG_LABEL}_null${arg_index}"
+            echo "    mov rdx, TYPE_STRING"
+            echo "    call print"
             ;;
         # Undefined literal
         "undefined")
-            echo "    mov rsi, ${LOG_LABEL}_undef${arg_index}"
-            echo "    call print_str"
+            echo "    mov rax, ${LOG_LABEL}_undef${arg_index}"
+            echo "    mov rdx, TYPE_STRING"
+            echo "    call print"
             ;;
         # String literals
         \'*\' | \"*\")
-            echo "    mov rsi, ${LOG_LABEL}_str${arg_index}"
-            echo "    call print_str"
+            echo "    mov rax, ${LOG_LABEL}_str${arg_index}"
+            echo "    mov rdx, TYPE_STRING"
+            echo "    call print"
             ;;
         # Numbers and variables
         *)
@@ -257,12 +256,14 @@ generate_assembly_for_arg() {
                 # Check if it's a float
                 if [[ "$arg" =~ \. ]] || [[ "$arg" =~ [eE] ]]; then
                     # Float - print as string
-                    echo "    mov rsi, ${LOG_LABEL}_num${arg_index}"
-                    echo "    call print_str"
+                    echo "    mov rax, ${LOG_LABEL}_num${arg_index}"
+                    echo "    mov rdx, TYPE_STRING"
+                    echo "    call print"
                 else
                     # Integer - print as number
                     echo "    mov rax, $arg"
-                    echo "    call print_num"
+                    echo "    mov rdx, TYPE_NUMBER"
+                    echo "    call print"
                 fi
             else
                 # Assume it's a variable
@@ -271,46 +272,45 @@ generate_assembly_for_arg() {
                 # Get variable type from registry
                 local var_type=$(get_variable_type "$var_name")
                 
-                # Generate appropriate code based on type
+                # Map registry types to print function types
                 case "$var_type" in
                     "string")
-                        echo "    mov rsi, $var_name"
-                        echo "    call print_str"
+                        echo "    mov rax, $var_name"
+                        echo "    mov rdx, TYPE_STRING"
+                        echo "    call print"
                         ;;
                     "integer")
                         echo "    mov rax, [$var_name]"
-                        echo "    call print_num"
+                        echo "    mov rdx, TYPE_NUMBER"
+                        echo "    call print"
                         ;;
                     "float")
-                        echo "    mov rsi, ${LOG_LABEL}_float${arg_index}"
-                        echo "    call print_str"
+                        echo "    mov rax, ${LOG_LABEL}_float${arg_index}"
+                        echo "    mov rdx, TYPE_STRING"
+                        echo "    call print"
                         ;;
                     "boolean")
                         echo "    ; Boolean variable: $var_name"
                         echo "    mov rax, [$var_name]"
-                        echo "    cmp rax, 0"
-                        echo "    je .${LOG_LABEL}_false${arg_index}"
-                        echo "    mov rsi, ${LOG_LABEL}_bool${arg_index}"
-                        echo "    call print_str"
-                        echo "    jmp .${LOG_LABEL}_done${arg_index}"
-                        echo ".${LOG_LABEL}_false${arg_index}:"
-                        echo "    mov rsi, ${LOG_LABEL}_bool${arg_index}_false"
-                        echo "    call print_str"
-                        echo ".${LOG_LABEL}_done${arg_index}:"
+                        echo "    mov rdx, TYPE_BOOLEAN"
+                        echo "    call print"
                         ;;
                     "null")
-                        echo "    mov rsi, ${LOG_LABEL}_null${arg_index}"
-                        echo "    call print_str"
+                        echo "    mov rax, ${LOG_LABEL}_null${arg_index}"
+                        echo "    mov rdx, TYPE_STRING"
+                        echo "    call print"
                         ;;
                     "undefined")
-                        echo "    mov rsi, ${LOG_LABEL}_undef${arg_index}"
-                        echo "    call print_str"
+                        echo "    mov rax, ${LOG_LABEL}_undef${arg_index}"
+                        echo "    mov rdx, TYPE_STRING"
+                        echo "    call print"
                         ;;
                     *)
                         # Unknown type - try to print as string
                         echo "    ; Unknown type for variable: $var_name"
-                        echo "    mov rsi, $var_name"
-                        echo "    call print_str"
+                        echo "    mov rax, $var_name"
+                        echo "    mov rdx, TYPE_STRING"
+                        echo "    call print"
                         ;;
                 esac
             fi
@@ -325,8 +325,9 @@ generate_console_log_code() {
     if [ -z "$CONTENT" ]; then
         # Empty console.log() - just print newline
         echo "    ; Empty console.log"
-        echo "    mov rsi, newline"
-        echo "    call print_str"
+        echo "    mov rax, newline"
+        echo "    mov rdx, TYPE_STRING"
+        echo "    call print"
         return
     fi
     
@@ -369,15 +370,17 @@ generate_console_log_code() {
         # Add space between arguments (except last one)
         if [ $i -lt $((${#args_array[@]} - 1)) ]; then
             echo "    ; Space between arguments"
-            echo "    mov rsi, space"
-            echo "    call print_str"
+            echo "    mov rax, space"
+            echo "    mov rdx, TYPE_STRING"
+            echo "    call print"
         fi
     done
     
     # Add newline after each console.log
     echo "    ; Newline after console.log"
-    echo "    mov rsi, newline"
-    echo "    call print_str"
+    echo "    mov rax, newline"
+    echo "    mov rdx, TYPE_STRING"
+    echo "    call print"
 }
 
 # Main execution
@@ -402,6 +405,7 @@ CODE_INSERTED=0
 DATA_INSERTED=0
 HAS_NEWLINE_CONSTANT=0
 HAS_SPACE_CONSTANT=0
+HAS_TYPE_CONSTANTS=0
 
 # First check if constants exist
 if grep -q "newline db 10, 0" "$OUTPUT_FILE"; then
@@ -410,6 +414,16 @@ fi
 
 if grep -q "space db ' ', 0" "$OUTPUT_FILE"; then
     HAS_SPACE_CONSTANT=1
+fi
+
+# Check if type constants exist
+if grep -q "TYPE_STRING equ 1" "$OUTPUT_FILE"; then
+    HAS_TYPE_CONSTANTS=1
+fi
+
+# Check if boolean strings exist
+if grep -q "true_str db 'true', 0" "$OUTPUT_FILE"; then
+    HAS_TYPE_CONSTANTS=1
 fi
 
 while IFS= read -r line; do
@@ -423,6 +437,26 @@ while IFS= read -r line; do
     # Check if we're leaving the data section
     if [[ "$IN_DATA_SECTION" -eq 1 ]] && [[ "$line" == section* ]]; then
         # We're leaving data section, insert our constants before leaving
+        
+        # Add type constants if needed
+        if [ "$HAS_TYPE_CONSTANTS" -eq 0 ]; then
+            echo "    ; Type constants for print function" >> "$TEMP_FILE"
+            echo "    TYPE_STRING equ 1" >> "$TEMP_FILE"
+            echo "    TYPE_NUMBER equ 2" >> "$TEMP_FILE"
+            echo "    TYPE_CHAR    equ 3" >> "$TEMP_FILE"
+            echo "    TYPE_BOOLEAN equ 4" >> "$TEMP_FILE"
+            echo "    TYPE_NULL    equ 5" >> "$TEMP_FILE"
+            echo "    TYPE_UNDEFINED equ 6" >> "$TEMP_FILE"
+            echo "" >> "$TEMP_FILE"
+            echo "    ; Boolean strings" >> "$TEMP_FILE"
+            echo "    true_str db 'true', 0" >> "$TEMP_FILE"
+            echo "    false_str db 'false', 0" >> "$TEMP_FILE"
+            echo "    null_str db 'null', 0" >> "$TEMP_FILE"
+            echo "    undefined_str db 'undefined', 0" >> "$TEMP_FILE"
+            echo "    hex_prefix db '0x', 0" >> "$TEMP_FILE"
+            HAS_TYPE_CONSTANTS=1
+        fi
+        
         if [ -n "$STRING_CONSTANTS" ] && [ "$DATA_INSERTED" -eq 0 ]; then
             echo -e "$STRING_CONSTANTS" >> "$TEMP_FILE"
             DATA_INSERTED=1
@@ -472,6 +506,25 @@ fi
 
 # If we're still in data section at EOF, append constants
 if [[ "$IN_DATA_SECTION" -eq 1 ]] && [ -n "$STRING_CONSTANTS" ] && [ "$DATA_INSERTED" -eq 0 ]; then
+    # Add type constants first if needed
+    if [ "$HAS_TYPE_CONSTANTS" -eq 0 ]; then
+        echo "    ; Type constants for print function" >> "$TEMP_FILE"
+        echo "    TYPE_STRING equ 1" >> "$TEMP_FILE"
+        echo "    TYPE_NUMBER equ 2" >> "$TEMP_FILE"
+        echo "    TYPE_CHAR    equ 3" >> "$TEMP_FILE"
+        echo "    TYPE_BOOLEAN equ 4" >> "$TEMP_FILE"
+        echo "    TYPE_NULL    equ 5" >> "$TEMP_FILE"
+        echo "    TYPE_UNDEFINED equ 6" >> "$TEMP_FILE"
+        echo "" >> "$TEMP_FILE"
+        echo "    ; Boolean strings" >> "$TEMP_FILE"
+        echo "    true_str db 'true', 0" >> "$TEMP_FILE"
+        echo "    false_str db 'false', 0" >> "$TEMP_FILE"
+        echo "    null_str db 'null', 0" >> "$TEMP_FILE"
+        echo "    undefined_str db 'undefined', 0" >> "$TEMP_FILE"
+        echo "    hex_prefix db '0x', 0" >> "$TEMP_FILE"
+        HAS_TYPE_CONSTANTS=1
+    fi
+    
     echo -e "$STRING_CONSTANTS" >> "$TEMP_FILE"
     
     # Add space constant if needed

@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# simple.sh - Converts JavaScript var declarations to NASM assembly data structures
-# Handles all primitive types: string, number, boolean, null, undefined, float
+# simple.sh - Handler for JavaScript var declarations
+# Determines the type and calls the appropriate script
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -32,56 +32,8 @@ else
     exit 1
 fi
 
-# Function to escape strings for NASM
-escape_for_nasm() {
-    local str="$1"
-    
-    if [ -z "$str" ]; then
-        echo "0"
-        return
-    fi
-    
-    local result=""
-    local i=0
-    local len=${#str}
-    
-    while [ $i -lt $len ]; do
-        local char="${str:$i:1}"
-        local char_code=$(printf "%d" "'$char")
-        
-        # Handle escape sequences
-        if [ "$char" = "\\" ] && [ $((i+1)) -lt $len ]; then
-            local next_char="${str:$((i+1)):1}"
-            case "$next_char" in
-                n)  result="${result}10, " ;;
-                t)  result="${result}9, " ;;
-                r)  result="${result}13, " ;;
-                \\\\) result="${result}92, " ;;
-                \") result="${result}34, " ;;
-                \') result="${result}39, " ;;
-                *)  result="${result}92, ${next_char}, " ;;
-            esac
-            i=$((i+2))
-        else
-            # ASCII characters (0-127) - single byte
-            if [ $char_code -lt 128 ]; then
-                result="${result}${char_code}, "
-            fi
-            i=$((i+1))
-        fi
-    done
-    
-    # Remove trailing comma and space, add null terminator
-    result="${result%, }"
-    if [ -n "$result" ]; then
-        echo "${result}, 0"
-    else
-        echo "0"
-    fi
-}
-
-# Function to determine and process primitive type
-process_primitive_type() {
+# Function to determine primitive type
+determine_type() {
     local value="$1"
     
     # Trim whitespace
@@ -89,172 +41,184 @@ process_primitive_type() {
     
     # Check for null
     if [ "$value" = "null" ]; then
-        echo "NULL"
+        echo "null"
         return
     fi
     
     # Check for undefined
     if [ "$value" = "undefined" ]; then
-        echo "UNDEFINED"
+        echo "undefined"
         return
     fi
     
     # Check for boolean
     if [ "$value" = "true" ] || [ "$value" = "false" ]; then
-        if [ "$value" = "true" ]; then
-            echo "BOOL:1"
-        else
-            echo "BOOL:0"
-        fi
+        echo "boolean"
         return
     fi
     
-    # Check for string (starts and ends with quotes)
-    if [[ "$value" =~ ^\"([^\"]*)\"$ ]] || [[ "$value" =~ ^\'([^\']*)\'$ ]]; then
-        local str_content="${BASH_REMATCH[1]}"
-        local escaped=$(escape_for_nasm "$str_content")
-        echo "STRING:$escaped"
+    # Check for string (starts and ends with quotes OR contains concatenation)
+    if [[ "$value" =~ ^\"([^\"]*)\"$ ]] || \
+       [[ "$value" =~ ^\'([^\']*)\'$ ]] || \
+       [[ "$value" =~ .*[\"\'].*[\"\'] ]] || \
+       [[ "$value" =~ .*[\+\"\'][[:space:]]*[\"\'] ]] || \
+       [[ "$value" =~ [\+\"\'][[:space:]]*[a-zA-Z0-9_]*[[:space:]]*[\"\'] ]]; then
+        echo "string"
         return
     fi
     
     # Check for number (integer or float)
-    # Check if it's a valid number (including negative, decimal, and scientific notation)
     if [[ "$value" =~ ^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$ ]] && [[ ! "$value" =~ ^-?0[0-9]+ ]]; then
-        # Check if it has a decimal point or scientific notation (treat as float)
+        # Check if it has a decimal point or scientific notation
         if [[ "$value" =~ \. ]] || [[ "$value" =~ [eE] ]]; then
-            # Try to parse as float
             if [[ "$value" =~ ^-?[0-9]*\.[0-9]+$ ]] || [[ "$value" =~ ^-?[0-9]+\.?[0-9]*[eE][-+]?[0-9]+$ ]]; then
-                echo "FLOAT:$value"
+                echo "float"
                 return
             fi
         fi
         
-        # Otherwise treat as integer
-        echo "INTEGER:$value"
+        echo "number"
         return
     fi
     
-    # Check for variable reference (valid JavaScript identifier)
+    # Check for variable reference
     if [[ "$value" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
-        echo "REFERENCE:$value"
+        echo "reference"
         return
     fi
     
-    # Default to string if no other type matches (quotes might have been stripped)
-    local escaped=$(escape_for_nasm "$value")
-    echo "STRING:$escaped"
+    # Default to string for any complex expression
+    echo "string"
 }
 
-# Function to generate assembly data for primitive type
-generate_assembly_for_primitive() {
-    local var_name="$1"
-    local processed_value="$2"
-    local type_label="$3"
-    
-    local assembly_data="\n    ; Variable: $var_name = $VAR_VALUE (type: $type_label)"
-    
-    # Determine the type and generate appropriate assembly
-    case "$processed_value" in
-        "NULL")
-            assembly_data+="\n    ${var_name} dq 0 ; null value"
-            ;;
-        "UNDEFINED")
-            assembly_data+="\n    ${var_name} dq 0 ; undefined value"
-            ;;
-        "BOOL:"*)
-            local bool_value="${processed_value#BOOL:}"
-            assembly_data+="\n    ${var_name} dq $bool_value ; boolean"
-            ;;
-        "STRING:"*)
-            local string_data="${processed_value#STRING:}"
-            assembly_data+="\n    ${var_name} db $string_data ; string"
-            ;;
-        "INTEGER:"*)
-            local int_value="${processed_value#INTEGER:}"
-            assembly_data+="\n    ${var_name} dq $int_value ; integer"
-            ;;
-        "FLOAT:"*)
-            local float_value="${processed_value#FLOAT:}"
-            # Store float as QWORD (8-byte double precision)
-            assembly_data+="\n    ${var_name} dq __float64__($float_value) ; float"
-            ;;
-        "REFERENCE:"*)
-            local ref_name="${processed_value#REFERENCE:}"
-            assembly_data+="\n    ${var_name} dq $ref_name ; reference to $ref_name"
-            ;;
-        *)
-            assembly_data+="\n    ${var_name} dq 0 ; unknown type"
-            ;;
-    esac
-    
-    echo -e "$assembly_data"
-}
+# Determine the type of the value
+TYPE=$(determine_type "$VAR_VALUE")
 
-# Main execution
-if [ ! -f "$OUTPUT_FILE" ]; then
-    echo "Error: $OUTPUT_FILE not found"
-    echo "Expected at: $OUTPUT_FILE"
+echo "Variable: $VAR_NAME = $VAR_VALUE"
+echo "Detected type: $TYPE"
+
+# Check if the simple directory exists
+if [ ! -d "./simple" ]; then
+    echo "Error: ./simple directory not found"
     exit 1
 fi
 
-# Process the variable value
-PROCESSED_VALUE=$(process_primitive_type "$VAR_VALUE")
-
-# Extract type label for display
-TYPE_LABEL=""
-case "$PROCESSED_VALUE" in
-    "NULL") TYPE_LABEL="null" ;;
-    "UNDEFINED") TYPE_LABEL="undefined" ;;
-    "BOOL:"*) TYPE_LABEL="boolean" ;;
-    "STRING:"*) TYPE_LABEL="string" ;;
-    "INTEGER:"*) TYPE_LABEL="integer" ;;
-    "FLOAT:"*) TYPE_LABEL="float" ;;
-    "REFERENCE:"*) TYPE_LABEL="reference" ;;
-    *) TYPE_LABEL="unknown" ;;
-esac
-
-# Generate assembly data
-ASSEMBLY_DATA=$(generate_assembly_for_primitive "$VAR_NAME" "$PROCESSED_VALUE" "$TYPE_LABEL")
-
-# Create temporary file
-TEMP_FILE=$(mktemp)
-
-# Insert data into .data section
-IN_DATA_SECTION=0
-DATA_INSERTED=0
-
-while IFS= read -r line; do
-    # Check if we're entering the data section
-    if [[ "$line" == "section .data" ]]; then
-        IN_DATA_SECTION=1
-        echo "$line" >> "$TEMP_FILE"
-        continue
-    fi
-    
-    # Check if we're leaving the data section
-    if [[ "$IN_DATA_SECTION" -eq 1 ]] && [[ "$line" == section* ]]; then
-        # We're leaving data section, insert our data before leaving
-        if [ "$DATA_INSERTED" -eq 0 ]; then
-            echo -e "$ASSEMBLY_DATA" >> "$TEMP_FILE"
-            DATA_INSERTED=1
+# Call the appropriate script based on type
+case "$TYPE" in
+    "string")
+        if [ -f "./simple/string.sh" ]; then
+            bash "./simple/string.sh"
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 0 ]; then
+                echo "Successfully processed string variable"
+                exit 0
+            else
+                echo "Error: string.sh failed with exit code $EXIT_CODE"
+                exit $EXIT_CODE
+            fi
+        else
+            echo "Error: string.sh not found in ./simple/"
+            exit 1
         fi
-        
-        IN_DATA_SECTION=0
-    fi
-    
-    # Write the current line
-    echo "$line" >> "$TEMP_FILE"
-    
-done < "$OUTPUT_FILE"
-
-# If we're still in data section at EOF, append data
-if [[ "$IN_DATA_SECTION" -eq 1 ]] && [ "$DATA_INSERTED" -eq 0 ]; then
-    echo -e "$ASSEMBLY_DATA" >> "$TEMP_FILE"
-fi
-
-# Replace the original file
-mv "$TEMP_FILE" "$OUTPUT_FILE"
-
-echo "Successfully added variable declaration to $OUTPUT_FILE"
-echo "Variable: $VAR_NAME = $VAR_VALUE"
-echo "Type: $TYPE_LABEL"
+        ;;
+    "number"|"integer")
+        if [ -f "./simple/number.sh" ]; then
+            bash "./simple/number.sh"
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 0 ]; then
+                echo "Successfully processed number variable"
+                exit 0
+            else
+                echo "Error: number.sh failed with exit code $EXIT_CODE"
+                exit $EXIT_CODE
+            fi
+        else
+            echo "Error: number.sh not found in ./simple/"
+            exit 1
+        fi
+        ;;
+    "boolean")
+        if [ -f "./simple/boolean.sh" ]; then
+            bash "./simple/boolean.sh"
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 0 ]; then
+                echo "Successfully processed boolean variable"
+                exit 0
+            else
+                echo "Error: boolean.sh failed with exit code $EXIT_CODE"
+                exit $EXIT_CODE
+            fi
+        else
+            echo "Error: boolean.sh not found in ./simple/"
+            exit 1
+        fi
+        ;;
+    "null")
+        if [ -f "./simple/null.sh" ]; then
+            bash "./simple/null.sh"
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 0 ]; then
+                echo "Successfully processed null variable"
+                exit 0
+            else
+                echo "Error: null.sh failed with exit code $EXIT_CODE"
+                exit $EXIT_CODE
+            fi
+        else
+            echo "Error: null.sh not found in ./simple/"
+            exit 1
+        fi
+        ;;
+    "undefined")
+        if [ -f "./simple/undefined.sh" ]; then
+            bash "./simple/undefined.sh"
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 0 ]; then
+                echo "Successfully processed undefined variable"
+                exit 0
+            else
+                echo "Error: undefined.sh failed with exit code $EXIT_CODE"
+                exit $EXIT_CODE
+            fi
+        else
+            echo "Error: undefined.sh not found in ./simple/"
+            exit 1
+        fi
+        ;;
+    "float")
+        if [ -f "./simple/float.sh" ]; then
+            bash "./simple/float.sh"
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 0 ]; then
+                echo "Successfully processed float variable"
+                exit 0
+            else
+                echo "Error: float.sh failed with exit code $EXIT_CODE"
+                exit $EXIT_CODE
+            fi
+        else
+            echo "Error: float.sh not found in ./simple/"
+            exit 1
+        fi
+        ;;
+    "reference")
+        if [ -f "./simple/reference.sh" ]; then
+            bash "./simple/reference.sh"
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 0 ]; then
+                echo "Successfully processed reference variable"
+                exit 0
+            else
+                echo "Error: reference.sh failed with exit code $EXIT_CODE"
+                exit $EXIT_CODE
+            fi
+        else
+            echo "Error: reference.sh not found in ./simple/"
+            exit 1
+        fi
+        ;;
+    *)
+        echo "Error: Unknown type '$TYPE'"
+        exit 1
+        ;;
+esac

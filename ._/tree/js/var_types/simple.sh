@@ -122,18 +122,18 @@ case "$TYPE" in
         fi
         ;;
     "number"|"integer")
-        if [ -f "./simple/number.sh" ]; then
-            bash "./simple/number.sh"
+        if [ -f "./simple/integer.sh" ]; then
+            bash "./simple/integer.sh"
             EXIT_CODE=$?
             if [ $EXIT_CODE -eq 0 ]; then
                 echo "Successfully processed number variable"
                 exit 0
             else
-                echo "Error: number.sh failed with exit code $EXIT_CODE"
+                echo "Error: integer.sh failed with exit code $EXIT_CODE"
                 exit $EXIT_CODE
             fi
         else
-            echo "Error: number.sh not found in ./simple/"
+            echo "Error: integer.sh not found in ./simple/"
             exit 1
         fi
         ;;

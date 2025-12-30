@@ -1,13 +1,12 @@
 #!/bin/bash
 
 # log.sh - Parses console.log() statements and converts them to assembly code
-# Updated for the new print function that detects types
+# Updated to work without var_types.txt file
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 OUTPUT_FILE="../../../build_output.asm"
-TYPE_REGISTRY="var_types.txt"
 
 if [ ! -f "log_input" ]; then
     echo "Error: log_input file not found in $(pwd)"
@@ -30,41 +29,76 @@ fi
 # Generate a unique label
 LOG_LABEL="log_$(date +%s%N | md5sum | cut -c1-8)"
 
-# Function to get variable type from registry
+# Function to get variable type from assembly code
 get_variable_type() {
     local var_name="$1"
     
-    if [ ! -f "$TYPE_REGISTRY" ]; then
+    if [ ! -f "$OUTPUT_FILE" ]; then
         echo "unknown"
         return
     fi
     
-    # Get the most recent entry for this variable
-    local type_info=$(grep "^$var_name:" "$TYPE_REGISTRY" | tail -1)
+    # Look for variable declarations in the assembly
+    # Check for different types of variables:
     
-    if [ -z "$type_info" ]; then
-        echo "unknown"
-    else
-        echo "$type_info" | cut -d: -f2
+    # 1. String variables (db with quotes)
+    if grep -q "^[[:space:]]*${var_name}[[:space:]]*db" "$OUTPUT_FILE"; then
+        echo "string"
+        return
     fi
+    
+    # 2. Integer variables (dq or resq for numbers)
+    if grep -q "^[[:space:]]*${var_name}[[:space:]]*dq" "$OUTPUT_FILE" || \
+       grep -q "^[[:space:]]*${var_name}[[:space:]]*resq" "$OUTPUT_FILE"; then
+        echo "integer"
+        return
+    fi
+    
+    # 3. Boolean variables (could be dq or db with boolean values)
+    if grep -q "^[[:space:]]*${var_name}[[:space:]]*db.*true\|false" "$OUTPUT_FILE" || \
+       grep -q "^[[:space:]]*${var_name}[[:space:]]*dq.*[01]" "$OUTPUT_FILE"; then
+        echo "boolean"
+        return
+    fi
+    
+    # 4. Character variables (db with single character)
+    if grep -q "^[[:space:]]*${var_name}[[:space:]]*db.*'.'" "$OUTPUT_FILE"; then
+        echo "char"
+        return
+    fi
+    
+    # Default to unknown
+    echo "unknown"
 }
 
-# Function to get variable value from registry
+# Function to get variable value from assembly code
 get_variable_value() {
     local var_name="$1"
     
-    if [ ! -f "$TYPE_REGISTRY" ]; then
+    if [ ! -f "$OUTPUT_FILE" ]; then
         echo ""
         return
     fi
     
-    local type_info=$(grep "^$var_name:" "$TYPE_REGISTRY" | tail -1)
+    # Extract the line where variable is defined
+    local var_line=$(grep "^[[:space:]]*${var_name}[[:space:]]*" "$OUTPUT_FILE" | head -1)
     
-    if [ -z "$type_info" ]; then
+    if [ -z "$var_line" ]; then
         echo ""
+        return
+    fi
+    
+    # Extract the value part (after db/dq)
+    if [[ "$var_line" =~ db[[:space:]]+(.+) ]]; then
+        local value="${BASH_REMATCH[1]}"
+        # Clean up the value
+        value=$(echo "$value" | sed 's/,.*$//' | sed "s/^'//" | sed "s/'$//" | sed 's/^"//' | sed 's/"$//')
+        echo "$value"
+    elif [[ "$var_line" =~ dq[[:space:]]+(.+) ]]; then
+        local value="${BASH_REMATCH[1]}"
+        echo "$value"
     else
-        # Get everything after the second colon
-        echo "$type_info" | cut -d: -f3-
+        echo ""
     fi
 }
 
@@ -198,10 +232,24 @@ generate_string_constants() {
                         local var_type=$(get_variable_type "$arg")
                         
                         case "$var_type" in
-                            "float")
-                                # Create a string representation of the float
-                                local float_value=$(get_variable_value "$arg")
-                                constants+="\n    ${LOG_LABEL}_float${i} db '$float_value', 0"
+                            "string")
+                                # Use existing variable, no need to create constant
+                                ;;
+                            "integer"|"boolean")
+                                # Numbers and booleans are handled in code generation
+                                ;;
+                            "char")
+                                # Character variables
+                                ;;
+                            *)
+                                # Unknown type - check if variable exists in assembly
+                                if grep -q "^[[:space:]]*${arg}[[:space:]]*" "$OUTPUT_FILE"; then
+                                    # Variable exists but type is unknown
+                                    local var_value=$(get_variable_value "$arg")
+                                    if [ -n "$var_value" ]; then
+                                        constants+="\n    ${LOG_LABEL}_var${i} db '$var_value', 0"
+                                    fi
+                                fi
                                 ;;
                         esac
                     fi
@@ -269,10 +317,10 @@ generate_assembly_for_arg() {
                 # Assume it's a variable
                 local var_name="$arg"
                 
-                # Get variable type from registry
+                # Get variable type from assembly
                 local var_type=$(get_variable_type "$var_name")
                 
-                # Map registry types to print function types
+                # Map variable types to print function types
                 case "$var_type" in
                     "string")
                         echo "    mov rax, $var_name"
@@ -284,33 +332,53 @@ generate_assembly_for_arg() {
                         echo "    mov rdx, TYPE_NUMBER"
                         echo "    call print"
                         ;;
-                    "float")
-                        echo "    mov rax, ${LOG_LABEL}_float${arg_index}"
-                        echo "    mov rdx, TYPE_STRING"
-                        echo "    call print"
-                        ;;
                     "boolean")
                         echo "    ; Boolean variable: $var_name"
                         echo "    mov rax, [$var_name]"
                         echo "    mov rdx, TYPE_BOOLEAN"
                         echo "    call print"
                         ;;
-                    "null")
-                        echo "    mov rax, ${LOG_LABEL}_null${arg_index}"
-                        echo "    mov rdx, TYPE_STRING"
+                    "char")
+                        echo "    ; Character variable: $var_name"
+                        echo "    mov rax, $var_name"
+                        echo "    mov rdx, TYPE_CHAR"
                         echo "    call print"
                         ;;
-                    "undefined")
-                        echo "    mov rax, ${LOG_LABEL}_undef${arg_index}"
-                        echo "    mov rdx, TYPE_STRING"
-                        echo "    call print"
+                    "unknown")
+                        # Try to determine type by checking variable definition
+                        if grep -q "^[[:space:]]*${var_name}[[:space:]]*db" "$OUTPUT_FILE"; then
+                            # Looks like a string
+                            echo "    mov rax, $var_name"
+                            echo "    mov rdx, TYPE_STRING"
+                            echo "    call print"
+                        elif grep -q "^[[:space:]]*${var_name}[[:space:]]*dq" "$OUTPUT_FILE"; then
+                            # Looks like a number
+                            echo "    mov rax, [$var_name]"
+                            echo "    mov rdx, TYPE_NUMBER"
+                            echo "    call print"
+                        else
+                            # Fallback - print as string
+                            echo "    ; Unknown variable type for: $var_name"
+                            echo "    mov rax, ${LOG_LABEL}_var${arg_index}"
+                            echo "    mov rdx, TYPE_STRING"
+                            echo "    call print"
+                        fi
                         ;;
                     *)
-                        # Unknown type - try to print as string
-                        echo "    ; Unknown type for variable: $var_name"
-                        echo "    mov rax, $var_name"
-                        echo "    mov rdx, TYPE_STRING"
-                        echo "    call print"
+                        # Variable not found in assembly, treat as literal
+                        if grep -q "^[[:space:]]*${var_name}[[:space:]]*" "$OUTPUT_FILE"; then
+                            # Variable exists but type couldn't be determined
+                            echo "    mov rax, $var_name"
+                            echo "    mov rdx, TYPE_STRING"
+                            echo "    call print"
+                        else
+                            # Not a variable - might be a typo or new variable
+                            # Print as literal string
+                            echo "    ; Variable not found: $var_name"
+                            echo "    mov rax, ${LOG_LABEL}_var${arg_index}"
+                            echo "    mov rdx, TYPE_STRING"
+                            echo "    call print"
+                        fi
                         ;;
                 esac
             fi

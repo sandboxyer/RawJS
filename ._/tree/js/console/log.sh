@@ -41,22 +41,28 @@ get_variable_type() {
     # Look for variable declarations in the assembly
     # Check for different types of variables:
     
-    # 1. String variables (db with quotes)
-    if grep -q "^[[:space:]]*${var_name}[[:space:]]*db" "$OUTPUT_FILE"; then
+    # 1. String variables (db with quotes or string comment)
+    if grep -q "^[[:space:]]*${var_name}[[:space:]]*db.*\"" "$OUTPUT_FILE" || 
+       grep -q "^[[:space:]]*${var_name}[[:space:]]*db.*string" "$OUTPUT_FILE"; then
         echo "string"
         return
     fi
     
-    # 2. Integer variables (dq or resq for numbers)
-    if grep -q "^[[:space:]]*${var_name}[[:space:]]*dq" "$OUTPUT_FILE" || \
-       grep -q "^[[:space:]]*${var_name}[[:space:]]*resq" "$OUTPUT_FILE"; then
-        echo "integer"
+    # 2. Integer variables (dq for numbers)
+    if grep -q "^[[:space:]]*${var_name}[[:space:]]*dq" "$OUTPUT_FILE"; then
+        # Check if it's actually a boolean (value 0 or 1 with boolean comment)
+        local var_line=$(grep "^[[:space:]]*${var_name}[[:space:]]*dq" "$OUTPUT_FILE" | head -1)
+        if [[ "$var_line" =~ dq[[:space:]]+[01][[:space:]]*\;(.*)boolean ]] || 
+            [[ "$var_line" =~ dq[[:space:]]+[01][[:space:]]*$ ]]; then
+            echo "boolean"
+        else
+            echo "integer"
+        fi
         return
     fi
     
-    # 3. Boolean variables (could be dq or db with boolean values)
-    if grep -q "^[[:space:]]*${var_name}[[:space:]]*db.*true\|false" "$OUTPUT_FILE" || \
-       grep -q "^[[:space:]]*${var_name}[[:space:]]*dq.*[01]" "$OUTPUT_FILE"; then
+    # 3. Boolean variables (check for boolean-specific patterns)
+    if grep -q "^[[:space:]]*${var_name}[[:space:]]*dq.*;[[:space:]]*boolean" "$OUTPUT_FILE"; then
         echo "boolean"
         return
     fi
@@ -64,6 +70,12 @@ get_variable_type() {
     # 4. Character variables (db with single character)
     if grep -q "^[[:space:]]*${var_name}[[:space:]]*db.*'.'" "$OUTPUT_FILE"; then
         echo "char"
+        return
+    fi
+    
+    # 5. Default db variables (treat as string)
+    if grep -q "^[[:space:]]*${var_name}[[:space:]]*db" "$OUTPUT_FILE"; then
+        echo "string"
         return
     fi
     
@@ -92,10 +104,12 @@ get_variable_value() {
     if [[ "$var_line" =~ db[[:space:]]+(.+) ]]; then
         local value="${BASH_REMATCH[1]}"
         # Clean up the value
-        value=$(echo "$value" | sed 's/,.*$//' | sed "s/^'//" | sed "s/'$//" | sed 's/^"//' | sed 's/"$//')
+        value=$(echo "$value" | sed 's/,.*$//' | sed "s/^'//" | sed "s/'$//" | sed 's/^"//' | sed 's/"$//' | sed 's/;.*$//')
         echo "$value"
     elif [[ "$var_line" =~ dq[[:space:]]+(.+) ]]; then
         local value="${BASH_REMATCH[1]}"
+        # Clean up the value (remove comments)
+        value=$(echo "$value" | sed 's/;.*$//' | sed 's/[[:space:]]*$//')
         echo "$value"
     else
         echo ""
@@ -261,7 +275,7 @@ generate_string_constants() {
     echo -e "$constants"
 }
 
-# Function to generate assembly code for a single argument
+# Function to generate assembly code for a single argument - FIXED VERSION
 generate_assembly_for_arg() {
     local arg="$1"
     local arg_index="$2"
@@ -352,10 +366,19 @@ generate_assembly_for_arg() {
                             echo "    mov rdx, TYPE_STRING"
                             echo "    call print"
                         elif grep -q "^[[:space:]]*${var_name}[[:space:]]*dq" "$OUTPUT_FILE"; then
-                            # Looks like a number
-                            echo "    mov rax, [$var_name]"
-                            echo "    mov rdx, TYPE_NUMBER"
-                            echo "    call print"
+                            # Check if it's a boolean (0 or 1)
+                            local var_value=$(get_variable_value "$var_name")
+                            if [[ "$var_value" =~ ^[01]$ ]]; then
+                                echo "    ; Boolean variable (auto-detected): $var_name"
+                                echo "    mov rax, [$var_name]"
+                                echo "    mov rdx, TYPE_BOOLEAN"
+                                echo "    call print"
+                            else
+                                # Looks like a number
+                                echo "    mov rax, [$var_name]"
+                                echo "    mov rdx, TYPE_NUMBER"
+                                echo "    call print"
+                            fi
                         else
                             # Fallback - print as string
                             echo "    ; Unknown variable type for: $var_name"

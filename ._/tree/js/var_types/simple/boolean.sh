@@ -56,8 +56,9 @@ if [ "$NORMALIZED_VALUE" = "true" ]; then
 fi
 
 # Generate assembly data
+# Use dq (8 bytes) for boolean variables with proper comment
 ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $BOOLEAN_DISPLAY (type: boolean)"
-ASSEMBLY_DATA+="\n    ${VAR_NAME} db $BOOLEAN_NUMERIC ; boolean (0=false, 1=true)"
+ASSEMBLY_DATA+="\n    ${VAR_NAME} dq $BOOLEAN_NUMERIC    ; boolean: 0=false, 1=true"
 
 # Create temporary file
 TEMP_FILE=$(mktemp)

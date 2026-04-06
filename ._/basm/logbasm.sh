@@ -1,8 +1,9 @@
 #!/bin/sh
 
-# sbasm.sh - 100% SILENT runner for .asm, .sh, and binary files with fallback logic
+# logbasm.sh - Runner that shows ONLY the actual program/script output
+# For .asm: shows ONLY the binary output (no compilation/linking messages)
+# For .sh: shows ONLY the script output
 # Compatible with both bash and ash
-# NO OUTPUT WHATSOEVER - suppresses compilation messages AND program output
 
 # Save caller's directory
 CALLER_DIR="$(pwd)"
@@ -10,6 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Check if input file is provided
 if [ $# -lt 1 ]; then
+    echo "Usage: $0 <file> [args...]" >&2
     exit 1
 fi
 
@@ -47,6 +49,12 @@ detect_file_type() {
                 echo "binary:$full_path"
             elif head -n 1 "$full_path" 2>/dev/null | grep -q "^#!"; then
                 echo "script:$full_path"
+            elif command -v file >/dev/null 2>&1; then
+                if file "$full_path" 2>/dev/null | grep -q -e "ELF" -e "executable" -e "Mach-O" -e "shared object"; then
+                    echo "binary:$full_path"
+                else
+                    echo "unknown:$full_path"
+                fi
             else
                 echo "unknown:$full_path"
             fi
@@ -122,7 +130,7 @@ find_alternative() {
     esac
 }
 
-# Function to run .asm file - 100% SILENT (no output at all)
+# Function to run .asm file - shows ONLY binary output (no compilation messages)
 run_asm() {
     local asm_file="$1"
     local args="$2"
@@ -160,66 +168,66 @@ run_asm() {
     chmod +x "$NASM_BINARY" 2>/dev/null
     
     BASENAME="$(basename "$asm_file" .asm)"
-    OUTPUT_DIR="$CALLER_DIR/.sbasm_tmp_$$"
+    OUTPUT_DIR="$CALLER_DIR/.logbasm_tmp_$$"
     OBJECT_FILE="$OUTPUT_DIR/${BASENAME}.o"
     BINARY_FILE="$OUTPUT_DIR/${BASENAME}"
     
-    rm -rf "$OUTPUT_DIR" 2>/dev/null
-    mkdir -p "$OUTPUT_DIR" 2>/dev/null
+    rm -rf "$OUTPUT_DIR"
+    mkdir -p "$OUTPUT_DIR"
     
-    # Compile completely silent
-    "$NASM_BINARY" -f "$FORMAT" "$asm_file" -o "$OBJECT_FILE" >/dev/null 2>&1
+    # Compile silently - suppress all output
+    "$NASM_BINARY" -f "$FORMAT" "$asm_file" -o "$OBJECT_FILE" 2>/dev/null
     if [ $? -ne 0 ]; then
-        rm -rf "$OUTPUT_DIR" 2>/dev/null
+        rm -rf "$OUTPUT_DIR"
         return 1
     fi
     
-    # Link completely silent
-    ld "$OBJECT_FILE" -o "$BINARY_FILE" >/dev/null 2>&1
+    # Link silently - suppress all output
+    ld "$OBJECT_FILE" -o "$BINARY_FILE" 2>/dev/null
     if [ $? -ne 0 ]; then
-        rm -rf "$OUTPUT_DIR" 2>/dev/null
+        rm -rf "$OUTPUT_DIR"
         return 1
     fi
     
     chmod +x "$BINARY_FILE" 2>/dev/null
-    rm -f "$OBJECT_FILE" 2>/dev/null
+    rm -f "$OBJECT_FILE"
     
-    # Run binary with ALL output suppressed
-    (cd "$CALLER_DIR" && "$BINARY_FILE" $args) >/dev/null 2>&1
+    # Run the binary - THIS OUTPUT IS SHOWN (the real program log)
+    (cd "$CALLER_DIR" && "$BINARY_FILE" $args)
     PROGRAM_EXIT=$?
     
-    rm -rf "$OUTPUT_DIR" 2>/dev/null
+    rm -rf "$OUTPUT_DIR"
     
     return $PROGRAM_EXIT
 }
 
-# Function to run .sh file - 100% SILENT (no output at all)
+# Function to run .sh file - shows ONLY script output
 run_sh() {
     local sh_file="$1"
     local args="$2"
     
-    # Run script with ALL output suppressed
-    (cd "$CALLER_DIR" && "$RUNNER_SHELL_PATH" "$sh_file" $args) >/dev/null 2>&1
+    # Run script - output is shown directly
+    (cd "$CALLER_DIR" && "$RUNNER_SHELL_PATH" "$sh_file" $args)
     return $?
 }
 
-# Function to run binary file - 100% SILENT (no output at all)
+# Function to run binary file - shows ONLY binary output
 run_binary() {
     local binary_file="$1"
     local args="$2"
     
-    # Run binary with ALL output suppressed
-    (cd "$CALLER_DIR" && "$binary_file" $args) >/dev/null 2>&1
+    # Run binary - output is shown directly
+    (cd "$CALLER_DIR" && "$binary_file" $args)
     return $?
 }
 
-# Function to run script file - 100% SILENT (no output at all)
+# Function to run script file - shows ONLY script output
 run_script() {
     local script_file="$1"
     local args="$2"
     
-    # Run script with ALL output suppressed
-    (cd "$CALLER_DIR" && "$script_file" $args) >/dev/null 2>&1
+    # Run script - output is shown directly
+    (cd "$CALLER_DIR" && "$script_file" $args)
     return $?
 }
 
@@ -268,12 +276,13 @@ main() {
                     current_file="$alternative_file"
                     continue
                 else
+                    echo "Error: File '$original_file' not found" >&2
                     exit 1
                 fi
                 ;;
             unknown)
-                # Try to execute with ALL output suppressed
-                (cd "$CALLER_DIR" && "$full_path" $PROGRAM_ARGS) >/dev/null 2>&1
+                # Try to execute
+                (cd "$CALLER_DIR" && "$full_path" $PROGRAM_ARGS)
                 EXIT_CODE=$?
                 
                 if [ $EXIT_CODE -eq 126 ] || [ $EXIT_CODE -eq 127 ]; then
@@ -282,6 +291,7 @@ main() {
                         current_file="$alternative_file"
                         continue
                     else
+                        echo "Cannot execute: $full_path" >&2
                         exit 1
                     fi
                 else

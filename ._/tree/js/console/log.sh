@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # log.sh - Parses console.log() statements and converts them to assembly code
-# Updated to work without var_types.txt file
+# Updated to handle undefined variables properly
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -29,12 +29,34 @@ fi
 # Generate a unique label
 LOG_LABEL="log_$(date +%s%N | md5sum | cut -c1-8)"
 
+# Function to check if variable is undefined
+is_variable_undefined() {
+    local var_name="$1"
+    
+    if [ ! -f "$OUTPUT_FILE" ]; then
+        return 1
+    fi
+    
+    # Check for the undefined flag pattern
+    if grep -q "^[[:space:]]*${var_name}_defined_flag db 0" "$OUTPUT_FILE"; then
+        return 0  # true - it is undefined
+    fi
+    
+    return 1  # false - it's defined
+}
+
 # Function to get variable type from assembly code
 get_variable_type() {
     local var_name="$1"
     
     if [ ! -f "$OUTPUT_FILE" ]; then
         echo "unknown"
+        return
+    fi
+    
+    # First check if it's undefined
+    if is_variable_undefined "$var_name"; then
+        echo "undefined"
         return
     fi
     
@@ -255,6 +277,10 @@ generate_string_constants() {
                             "char")
                                 # Character variables
                                 ;;
+                            "undefined")
+                                # Undefined variable - we'll print "undefined"
+                                constants+="\n    ${LOG_LABEL}_undef${i} db 'undefined', 0"
+                                ;;
                             *)
                                 # Unknown type - check if variable exists in assembly
                                 if grep -q "^[[:space:]]*${arg}[[:space:]]*" "$OUTPUT_FILE"; then
@@ -275,7 +301,7 @@ generate_string_constants() {
     echo -e "$constants"
 }
 
-# Function to generate assembly code for a single argument - FIXED VERSION
+# Function to generate assembly code for a single argument - UPDATED FOR UNDEFINED
 generate_assembly_for_arg() {
     local arg="$1"
     local arg_index="$2"
@@ -336,6 +362,12 @@ generate_assembly_for_arg() {
                 
                 # Map variable types to print function types
                 case "$var_type" in
+                    "undefined")
+                        echo "    ; Undefined variable: $var_name"
+                        echo "    mov rax, ${LOG_LABEL}_undef${arg_index}"
+                        echo "    mov rdx, TYPE_STRING"
+                        echo "    call print"
+                        ;;
                     "string")
                         echo "    mov rax, $var_name"
                         echo "    mov rdx, TYPE_STRING"
@@ -636,3 +668,4 @@ mv "$TEMP_FILE" "$OUTPUT_FILE"
 
 echo "Successfully appended console.log assembly code to $OUTPUT_FILE"
 echo "Parsed statement: console.log($CONTENT)"
+exit 0

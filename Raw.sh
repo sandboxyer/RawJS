@@ -3,6 +3,12 @@
 # Raw.sh - Main build script with conditional compilation (silent mode)
 
 # ============================================
+# GET SCRIPT'S OWN DIRECTORY (not caller's directory)
+# ============================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"  # Change to script's directory to ensure consistent paths
+
+# ============================================
 # VERBOSITY CONTROL FOR DEV COMPILATION STEP
 # ============================================
 # Set to "true" to enable compilation error/output (for debugging)
@@ -51,8 +57,8 @@ dev_error() {
 get_basm_script() {
     local mode="$1"  # normal, silent, log
     
-    # Base path for basm scripts
-    local basm_base="./dev/basm"
+    # Base path for basm scripts (based on script's directory)
+    local basm_base="$SCRIPT_DIR/dev/basm"
     
     case "$mode" in
         "silent")
@@ -77,12 +83,12 @@ resolve_file_path() {
     
     case "$EXECUTION_SOURCE" in
         "source")
-            # Use ._ directory
-            echo "./._/$file_path"
+            # Use ._ directory (based on script's directory)
+            echo "$SCRIPT_DIR/._/$file_path"
             ;;
         "dev"|*)
-            # Use dev directory (default)
-            echo "./dev/$file_path"
+            # Use dev directory (based on script's directory)
+            echo "$SCRIPT_DIR/dev/$file_path"
             ;;
     esac
 }
@@ -119,35 +125,32 @@ execute_file() {
     fi
     
     # Execute with appropriate verbosity
-    # In the execute_file function, replace the execution section with:
-
-# Execute with appropriate verbosity
-case "$mode" in
-   "silent")
-    # Silent mode: suppress all output from basm
-    if [[ "$full_path" == *.sh ]]; then
-        bash "$full_path" $additional_args >/dev/null 2>&1
-    else
-        "$basm_script" "$full_path" $additional_args >/dev/null 2>&1
-    fi
-    ;;
-    "log")
-        # Log mode: show execution output but not compilation logs
-        if [[ "$full_path" == *.sh ]]; then
-            bash "$full_path" $additional_args
-        else
-            "$basm_script" "$full_path" $additional_args
-        fi
-        ;;
-    "normal"|*)
-        # Normal mode: show all output
-        if [[ "$full_path" == *.sh ]]; then
-            bash "$full_path" $additional_args
-        else
-            "$basm_script" "$full_path" $additional_args
-        fi
-        ;;
-esac
+    case "$mode" in
+        "silent")
+            # Silent mode: suppress all output from basm
+            if [[ "$full_path" == *.sh ]]; then
+                bash "$full_path" $additional_args >/dev/null 2>&1
+            else
+                "$basm_script" "$full_path" $additional_args >/dev/null 2>&1
+            fi
+            ;;
+        "log")
+            # Log mode: show execution output but not compilation logs
+            if [[ "$full_path" == *.sh ]]; then
+                bash "$full_path" $additional_args
+            else
+                "$basm_script" "$full_path" $additional_args
+            fi
+            ;;
+        "normal"|*)
+            # Normal mode: show all output
+            if [[ "$full_path" == *.sh ]]; then
+                bash "$full_path" $additional_args
+            else
+                "$basm_script" "$full_path" $additional_args
+            fi
+            ;;
+    esac
     
     return $?
 }
@@ -238,8 +241,8 @@ compile_and_copy() {
 
     dev_log "${GREEN}Detected architecture: ${ARCH} (using ${FORMAT} format)${NC}"
 
-    # Set up NASM binary path
-    NASM_BINARY="./._/basm/${ARCH}-linux/nasm-${ARCH}-linux"
+    # Set up NASM binary path (based on script's directory)
+    NASM_BINARY="$SCRIPT_DIR/._/basm/${ARCH}-linux/nasm-${ARCH}-linux"
 
     # Check if NASM binary exists
     if [ ! -f "$NASM_BINARY" ]; then
@@ -252,49 +255,49 @@ compile_and_copy() {
     # Make NASM binary executable
     chmod +x "$NASM_BINARY" 2>/dev/null
 
-    # Clean up old /dev directory and create brand new
+    # Clean up old /dev directory and create brand new (based on script's directory)
     dev_log "${BLUE}Cleaning up and creating new /dev directory...${NC}"
-    rm -rf "./dev" 2>/dev/null
-    mkdir -p "./dev" 2>/dev/null
+    rm -rf "$SCRIPT_DIR/dev" 2>/dev/null
+    mkdir -p "$SCRIPT_DIR/dev" 2>/dev/null
 
     # Create directory structure for all directories EXCEPT nasm (we'll handle basm separately)
     dev_log "${BLUE}Creating directory structure...${NC}"
-    find "./._" -type d 2>/dev/null | while IFS= read -r dir; do
+    find "$SCRIPT_DIR/._" -type d 2>/dev/null | while IFS= read -r dir; do
         # Skip the entire nasm directory - we'll handle basm files manually
-        if [[ "$dir" == "./._/basm"* ]]; then
+        if [[ "$dir" == "$SCRIPT_DIR/._/basm"* ]]; then
             continue
         fi
         
         # Create corresponding directory in /dev
-        new_dir="${dir/.\/._/.\/dev}"
+        new_dir="${dir/$SCRIPT_DIR\/\.\_/$SCRIPT_DIR\/dev}"
         mkdir -p "$new_dir" 2>/dev/null
     done
 
     # Special handling for basm directory - create full structure
     dev_log "${BLUE}Creating basm directory structure...${NC}"
-    mkdir -p "./dev/basm" 2>/dev/null
-    mkdir -p "./dev/basm/arm-linux" 2>/dev/null
-    mkdir -p "./dev/basm/i386-linux" 2>/dev/null
-    mkdir -p "./dev/basm/x86_64-linux" 2>/dev/null
+    mkdir -p "$SCRIPT_DIR/dev/basm" 2>/dev/null
+    mkdir -p "$SCRIPT_DIR/dev/basm/arm-linux" 2>/dev/null
+    mkdir -p "$SCRIPT_DIR/dev/basm/i386-linux" 2>/dev/null
+    mkdir -p "$SCRIPT_DIR/dev/basm/x86_64-linux" 2>/dev/null
 
     # Find all .asm files (excluding basm directory)
     dev_log "${BLUE}Finding .asm files...${NC}"
-    ASM_FILES=$(find "./._" -name "*.asm" ! -path "./._/basm/*" 2>/dev/null)
+    ASM_FILES=$(find "$SCRIPT_DIR/._" -name "*.asm" ! -path "$SCRIPT_DIR/._/basm/*" 2>/dev/null)
     ASM_COUNT=$(echo "$ASM_FILES" | wc -l)
 
     # Find all .sh files (excluding basm directory - we'll handle basm scripts separately)
     dev_log "${BLUE}Finding .sh files...${NC}"
-    SH_FILES=$(find "./._" -name "*.sh" ! -path "./._/basm/*" 2>/dev/null)
+    SH_FILES=$(find "$SCRIPT_DIR/._" -name "*.sh" ! -path "$SCRIPT_DIR/._/basm/*" 2>/dev/null)
     SH_COUNT=$(echo "$SH_FILES" | wc -l)
 
     # Find all binary files (excluding basm directory - we'll handle basm binaries separately)
     dev_log "${BLUE}Finding binary files...${NC}"
-    BINARY_FILES=$(find "./._" -type f ! -name "*.asm" ! -name "*.sh" ! -path "./._/basm/*" 2>/dev/null)
+    BINARY_FILES=$(find "$SCRIPT_DIR/._" -type f ! -name "*.asm" ! -name "*.sh" ! -path "$SCRIPT_DIR/._/basm/*" 2>/dev/null)
     BINARY_COUNT=$(echo "$BINARY_FILES" | wc -l)
 
     # Find all files in basm directory (scripts, binaries, everything)
     dev_log "${BLUE}Finding basm files...${NC}"
-    BASM_FILES=$(find "./._/basm" -type f 2>/dev/null)
+    BASM_FILES=$(find "$SCRIPT_DIR/._/basm" -type f 2>/dev/null)
     BASM_COUNT=$(echo "$BASM_FILES" | wc -l)
 
     TOTAL_FILES=$((ASM_COUNT + SH_COUNT + BINARY_COUNT + BASM_COUNT))
@@ -335,7 +338,7 @@ compile_and_copy() {
             dev_log "\n${YELLOW}[${total_asm_files}] Processing ASM: ${asm_file}${NC}"
             
             # Generate output paths
-            output_file="${asm_file/.\/._/.\/dev}"
+            output_file="${asm_file/$SCRIPT_DIR\/\.\_/$SCRIPT_DIR\/dev}"
             output_file="${output_file%.asm}"  # Remove .asm extension
             object_file="${output_file}.o"
             
@@ -389,7 +392,7 @@ compile_and_copy() {
             dev_log "${YELLOW}[${total_sh_files}] Copying SH: ${sh_file}${NC}"
             
             # Generate output path
-            output_file="${sh_file/.\/._/.\/dev}"
+            output_file="${sh_file/$SCRIPT_DIR\/\.\_/$SCRIPT_DIR\/dev}"
             
             # Ensure output directory exists
             mkdir -p "$(dirname "$output_file")" 2>/dev/null
@@ -427,7 +430,7 @@ compile_and_copy() {
             dev_log "${YELLOW}[${total_binary_files}] Copying binary: ${binary_file}${NC}"
             
             # Generate output path
-            output_file="${binary_file/.\/._/.\/dev}"
+            output_file="${binary_file/$SCRIPT_DIR\/\.\_/$SCRIPT_DIR\/dev}"
             
             # Ensure output directory exists
             mkdir -p "$(dirname "$output_file")" 2>/dev/null
@@ -465,7 +468,7 @@ compile_and_copy() {
             dev_log "${YELLOW}[${total_basm_files}] Processing basm file: ${basm_file}${NC}"
             
             # Generate output path (preserve subdirectory structure)
-            output_file="${basm_file/.\/._/.\/dev}"
+            output_file="${basm_file/$SCRIPT_DIR\/\.\_/$SCRIPT_DIR\/dev}"
             
             # Ensure output directory exists
             mkdir -p "$(dirname "$output_file")" 2>/dev/null
@@ -529,15 +532,15 @@ compile_and_copy() {
             
             # List the basm directory contents specifically
             echo -e "\n${BLUE}=== /dev/basm Directory Contents ===${NC}"
-            if [ -d "./dev/basm" ]; then
-                ls -la "./dev/basm" 2>/dev/null | tail -n +2
+            if [ -d "$SCRIPT_DIR/dev/basm" ]; then
+                ls -la "$SCRIPT_DIR/dev/basm" 2>/dev/null | tail -n +2
             fi
         fi
 
-        echo -e "\n${GREEN}Output directory: ./dev${NC}"
+        echo -e "\n${GREEN}Output directory: $SCRIPT_DIR/dev${NC}"
 
         # Display what's in /dev with tree-like structure
-        echo -e "\n${BLUE}=== /dev Directory Structure ===${NC}"
+        echo -e "\n${BLUE}=== $SCRIPT_DIR/dev Directory Structure ===${NC}"
         echo -e "${GREEN}Executable files created:${NC}"
 
         # Use a simple tree display
@@ -559,8 +562,8 @@ compile_and_copy() {
             done
         }
 
-        # Start listing from ./dev
-        for item in ./dev/*; do
+        # Start listing from $SCRIPT_DIR/dev
+        for item in "$SCRIPT_DIR/dev"/*; do
             if [ -d "$item" ]; then
                 echo "└── $(basename "$item")/"
                 list_files "    " "$item"
@@ -589,7 +592,7 @@ compile_and_copy() {
         fi
         
         expected_total=$((ASM_COUNT + SH_COUNT + BINARY_COUNT + BASM_COUNT))
-        actual_total=$(find "./dev" -type f 2>/dev/null | wc -l)
+        actual_total=$(find "$SCRIPT_DIR/dev" -type f 2>/dev/null | wc -l)
         
         echo -e "Total files created: $actual_total"
         
@@ -600,7 +603,7 @@ compile_and_copy() {
         fi
 
         echo -e "\n${GREEN}Build completed successfully!${NC}"
-        echo -e "All binaries, shell scripts, and executables are available in the ./dev directory"
+        echo -e "All binaries, shell scripts, and executables are available in the $SCRIPT_DIR/dev directory"
     fi
     
     return 0
@@ -692,8 +695,8 @@ main_flow() {
         JS_ARGS="$@"
     fi
     
-    # Step 1: Compile and copy only if ./dev doesn't exist
-    if [ ! -d "./dev" ]; then
+    # Step 1: Compile and copy only if ./dev doesn't exist (based on script's directory)
+    if [ ! -d "$SCRIPT_DIR/dev" ]; then
         compile_and_copy
         if [ $? -ne 0 ]; then
             if [ "$VERBOSE_DEV" = "true" ]; then
@@ -714,8 +717,8 @@ main_flow() {
         # NOW EXECUTE YOUR FILES USING THE JS PATH
         # ============================================
 
-        OUTPUT_JS="${PWD}/output.js" 
-        ARCH_OUTPUT="${PWD}/arch_output" 
+        OUTPUT_JS="$SCRIPT_DIR/output.js" 
+        ARCH_OUTPUT="$SCRIPT_DIR/arch_output" 
         
         # Example: Execute a processor with the JS file as argument
         #execute_file "normal" "path/to/processor" "$JS_FILE_PATH" "$JS_ARGS"
@@ -727,7 +730,7 @@ main_flow() {
         mv_file "build_output.asm" "$EXECUTION_SOURCE/build_output.asm"
         execute_file "silent" "./arch" "$OUTPUT_JS"
         mv_file "arch_output" "$EXECUTION_SOURCE/arch_output"
-        rm_file "$PWD/output.js"
+        rm_file "$SCRIPT_DIR/output.js"
         execute_file "silent" "./tree/build.sh"
         execute_file "log" "./build_output.asm"
     else

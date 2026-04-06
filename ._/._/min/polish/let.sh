@@ -41,27 +41,17 @@ fi
 if [[ $# -ge 2 ]]; then
     OUTPUT_FILE="$2"
 else
-    OUTPUT_FILE="var_output.js"
+    OUTPUT_FILE="output.js"
 fi
 
-# Check if output file already exists (ask for confirmation)
+# Force overwrite without asking
 if [[ -f "$OUTPUT_FILE" && "$OUTPUT_FILE" != "$INPUT_FILE" ]]; then
-    read -p "Output file '$OUTPUT_FILE' already exists. Overwrite? (y/n): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Operation cancelled."
-        exit 0
-    fi
+    echo "Output file '$OUTPUT_FILE' already exists. Will overwrite."
 fi
 
-# Check if trying to overwrite input file
+# Force overwrite input file without asking
 if [[ "$OUTPUT_FILE" == "$INPUT_FILE" ]]; then
-    read -p "Warning: Output file is the same as input file. This will overwrite the original. Continue? (y/n): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Operation cancelled."
-        exit 0
-    fi
+    echo "Warning: Output file is the same as input file. Will overwrite original."
 fi
 
 # Read the entire file content

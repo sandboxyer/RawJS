@@ -123,14 +123,14 @@ execute_file() {
 
 # Execute with appropriate verbosity
 case "$mode" in
-    "silent")
-        # Silent mode: suppress all output from basm
-        if [[ "$full_path" == *.sh ]]; then
-            bash "$full_path" $additional_args 2>/dev/null
-        else
-            "$basm_script" "$full_path" $additional_args 2>/dev/null
-        fi
-        ;;
+   "silent")
+    # Silent mode: suppress all output from basm
+    if [[ "$full_path" == *.sh ]]; then
+        bash "$full_path" $additional_args >/dev/null 2>&1
+    else
+        "$basm_script" "$full_path" $additional_args >/dev/null 2>&1
+    fi
+    ;;
     "log")
         # Log mode: show execution output but not compilation logs
         if [[ "$full_path" == *.sh ]]; then
@@ -183,12 +183,37 @@ execute_sequence() {
     return $fail_count
 }
 
+# ============================================
+# FILE MANIPULATION FUNCTIONS
+# ============================================
+
+# Minimalistic move file
+# Usage: mv_file "source" "destination"
+mv_file() {
+    mv "$1" "$2" 2>/dev/null
+}
+
+# Minimalistic delete file  
+# Usage: rm_file "file_path"
+rm_file() {
+    rm -f "$1" 2>/dev/null
+}
+
+# Minimalistic delete directory
+# Usage: rm_dir "directory_path"
+rm_dir() {
+    rm -rf "$1" 2>/dev/null
+}
+
 # Function: Compile and link all .asm files and copy .sh files to /dev directory
+# This only runs if ./dev directory does NOT exist
+# COMPLETELY SILENT unless VERBOSE_DEV=true
+# Function: Compile and link all .asm files, copy .sh files and binaries to /dev directory
 # This only runs if ./dev directory does NOT exist
 # COMPLETELY SILENT unless VERBOSE_DEV=true
 compile_and_copy() {
     dev_log "${BLUE}Starting compilation and linking of .asm files...${NC}"
-    dev_log "${BLUE}Also copying .sh files to /dev directory...${NC}"
+    dev_log "${BLUE}Also copying .sh files and binaries to /dev directory...${NC}"
 
     # Determine current architecture
     ARCH=""
@@ -232,11 +257,11 @@ compile_and_copy() {
     rm -rf "./dev" 2>/dev/null
     mkdir -p "./dev" 2>/dev/null
 
-    # Create directory structure
+    # Create directory structure for all directories EXCEPT nasm (we'll handle basm separately)
     dev_log "${BLUE}Creating directory structure...${NC}"
     find "./._" -type d 2>/dev/null | while IFS= read -r dir; do
-        # Skip the nasm directory and its contents
-        if [[ "$dir" == "./._/nasm"* ]]; then
+        # Skip the entire nasm directory - we'll handle basm files manually
+        if [[ "$dir" == "./._/basm"* ]]; then
             continue
         fi
         
@@ -245,35 +270,65 @@ compile_and_copy() {
         mkdir -p "$new_dir" 2>/dev/null
     done
 
-    # Find all .asm files
+    # Special handling for basm directory - create full structure
+    dev_log "${BLUE}Creating basm directory structure...${NC}"
+    mkdir -p "./dev/basm" 2>/dev/null
+    mkdir -p "./dev/basm/arm-linux" 2>/dev/null
+    mkdir -p "./dev/basm/i386-linux" 2>/dev/null
+    mkdir -p "./dev/basm/x86_64-linux" 2>/dev/null
+
+    # Find all .asm files (excluding basm directory)
     dev_log "${BLUE}Finding .asm files...${NC}"
-    ASM_FILES=$(find "./._" -name "*.asm" ! -path "./._/nasm/*" 2>/dev/null)
+    ASM_FILES=$(find "./._" -name "*.asm" ! -path "./._/basm/*" 2>/dev/null)
     ASM_COUNT=$(echo "$ASM_FILES" | wc -l)
 
-    # Find all .sh files
+    # Find all .sh files (excluding basm directory - we'll handle basm scripts separately)
     dev_log "${BLUE}Finding .sh files...${NC}"
-    SH_FILES=$(find "./._" -name "*.sh" ! -path "./._/nasm/*" 2>/dev/null)
+    SH_FILES=$(find "./._" -name "*.sh" ! -path "./._/basm/*" 2>/dev/null)
     SH_COUNT=$(echo "$SH_FILES" | wc -l)
 
-    if [ "$ASM_COUNT" -eq 0 ] && [ "$SH_COUNT" -eq 0 ]; then
-        dev_error "${RED}No .asm or .sh files found!${NC}"
+    # Find all binary files (excluding basm directory - we'll handle basm binaries separately)
+    dev_log "${BLUE}Finding binary files...${NC}"
+    BINARY_FILES=$(find "./._" -type f ! -name "*.asm" ! -name "*.sh" ! -path "./._/basm/*" 2>/dev/null)
+    BINARY_COUNT=$(echo "$BINARY_FILES" | wc -l)
+
+    # Find all files in basm directory (scripts, binaries, everything)
+    dev_log "${BLUE}Finding basm files...${NC}"
+    BASM_FILES=$(find "./._/basm" -type f 2>/dev/null)
+    BASM_COUNT=$(echo "$BASM_FILES" | wc -l)
+
+    TOTAL_FILES=$((ASM_COUNT + SH_COUNT + BINARY_COUNT + BASM_COUNT))
+    
+    if [ "$TOTAL_FILES" -eq 0 ]; then
+        dev_error "${RED}No .asm, .sh, binary, or basm files found!${NC}"
         return 1
     fi
 
-    dev_log "${YELLOW}Found $ASM_COUNT .asm files and $SH_COUNT .sh files to process${NC}"
-
-    # Now compile and link all .asm files
-    if [ "$ASM_COUNT" -gt 0 ]; then
-        dev_log "${BLUE}\nCompiling and linking .asm files...${NC}"
-    fi
+    dev_log "${YELLOW}Found $ASM_COUNT .asm files, $SH_COUNT .sh files, $BINARY_COUNT binary files, and $BASM_COUNT basm files to process${NC}"
 
     # Initialize counters
     total_asm_files=0
     compiled_files=0
-    failed_files=0
+    failed_asm_files=0
+    
+    total_sh_files=0
+    copied_sh_files=0
+    failed_sh_files=0
+    
+    total_binary_files=0
+    copied_binary_files=0
+    failed_binary_files=0
+    
+    total_basm_files=0
+    copied_basm_files=0
+    failed_basm_files=0
 
-    # Process .asm files
+    # ============================================
+    # PROCESS 1: Compile and link all .asm files
+    # ============================================
     if [ "$ASM_COUNT" -gt 0 ]; then
+        dev_log "${BLUE}\n[1/4] Compiling and linking .asm files...${NC}"
+        
         while IFS= read -r asm_file; do
             ((total_asm_files++))
             
@@ -295,10 +350,9 @@ compile_and_copy() {
             if [ $NASM_EXIT -eq 0 ]; then
                 dev_log "  ${GREEN}✓ Compilation successful${NC}"
             else
-                # Only show error if VERBOSE_DEV=true
                 dev_error "${RED}  ✗ Compilation failed for: ${asm_file}${NC}"
                 rm -f "$object_file" 2>/dev/null
-                ((failed_files++))
+                ((failed_asm_files++))
                 continue
             fi
             
@@ -313,7 +367,7 @@ compile_and_copy() {
                 ((compiled_files++))
             else
                 dev_error "${RED}  ✗ Linking failed for: ${asm_file}${NC}"
-                ((failed_files++))
+                ((failed_asm_files++))
             fi
             
             # Step 3: Clean up object file
@@ -323,13 +377,11 @@ compile_and_copy() {
         done < <(echo "$ASM_FILES")
     fi
 
-    # Now copy all .sh files
+    # ============================================
+    # PROCESS 2: Copy all .sh files (non-basm)
+    # ============================================
     if [ "$SH_COUNT" -gt 0 ]; then
-        dev_log "\n${BLUE}Copying .sh files to /dev directory...${NC}"
-        
-        total_sh_files=0
-        copied_sh_files=0
-        failed_sh_files=0
+        dev_log "\n${BLUE}[2/4] Copying .sh files to /dev directory...${NC}"
         
         while IFS= read -r sh_file; do
             ((total_sh_files++))
@@ -360,24 +412,126 @@ compile_and_copy() {
         done < <(echo "$SH_FILES")
     fi
 
-    # Summary (only shown in verbose mode)
+    # ============================================
+    # PROCESS 3: Copy all binary files (non-basm)
+    # ============================================
+    if [ "$BINARY_COUNT" -gt 0 ] && [ -n "$BINARY_FILES" ]; then
+        dev_log "\n${BLUE}[3/4] Copying binary files to /dev directory...${NC}"
+        
+        while IFS= read -r binary_file; do
+            # Skip empty lines
+            [ -z "$binary_file" ] && continue
+            
+            ((total_binary_files++))
+            
+            dev_log "${YELLOW}[${total_binary_files}] Copying binary: ${binary_file}${NC}"
+            
+            # Generate output path
+            output_file="${binary_file/.\/._/.\/dev}"
+            
+            # Ensure output directory exists
+            mkdir -p "$(dirname "$output_file")" 2>/dev/null
+            
+            # Copy the binary file (completely silent)
+            dev_log "  Copying: cp \"${binary_file}\" \"${output_file}\""
+            cp "$binary_file" "$output_file" 2>/dev/null
+            COPY_EXIT=$?
+            
+            if [ $COPY_EXIT -eq 0 ]; then
+                # Make it executable
+                chmod +x "$output_file" 2>/dev/null
+                dev_log "  ${GREEN}✓ Binary copy successful${NC}"
+                ((copied_binary_files++))
+            else
+                dev_error "${RED}  ✗ Binary copy failed for: ${binary_file}${NC}"
+                ((failed_binary_files++))
+            fi
+            
+        done < <(echo "$BINARY_FILES")
+    fi
+
+    # ============================================
+    # PROCESS 4: Copy all basm files (scripts and binaries)
+    # ============================================
+    if [ "$BASM_COUNT" -gt 0 ] && [ -n "$BASM_FILES" ]; then
+        dev_log "\n${BLUE}[4/4] Copying basm files to /dev/basm directory...${NC}"
+        
+        while IFS= read -r basm_file; do
+            # Skip empty lines
+            [ -z "$basm_file" ] && continue
+            
+            ((total_basm_files++))
+            
+            dev_log "${YELLOW}[${total_basm_files}] Processing basm file: ${basm_file}${NC}"
+            
+            # Generate output path (preserve subdirectory structure)
+            output_file="${basm_file/.\/._/.\/dev}"
+            
+            # Ensure output directory exists
+            mkdir -p "$(dirname "$output_file")" 2>/dev/null
+            
+            # Copy the file (completely silent)
+            dev_log "  Copying: cp \"${basm_file}\" \"${output_file}\""
+            cp "$basm_file" "$output_file" 2>/dev/null
+            COPY_EXIT=$?
+            
+            if [ $COPY_EXIT -eq 0 ]; then
+                # Make it executable if it's a binary or script
+                chmod +x "$output_file" 2>/dev/null
+                dev_log "  ${GREEN}✓ Copy successful${NC}"
+                ((copied_basm_files++))
+            else
+                dev_error "${RED}  ✗ Copy failed for: ${basm_file}${NC}"
+                ((failed_basm_files++))
+            fi
+            
+        done < <(echo "$BASM_FILES")
+    fi
+
+    # ============================================
+    # SUMMARY (only shown in verbose mode)
+    # ============================================
     if [ "$VERBOSE_DEV" = "true" ]; then
         echo -e "\n${BLUE}=== Compilation Summary ===${NC}"
         if [ "$ASM_COUNT" -gt 0 ]; then
             echo -e "${GREEN}Successfully compiled and linked: ${compiled_files} .asm files${NC}"
-            if [ $failed_files -gt 0 ]; then
-                echo -e "${RED}Failed: ${failed_files} .asm files${NC}"
+            if [ $failed_asm_files -gt 0 ]; then
+                echo -e "${RED}Failed: ${failed_asm_files} .asm files${NC}"
             fi
             echo -e "Total .asm files processed: ${total_asm_files}"
         fi
 
         if [ "$SH_COUNT" -gt 0 ]; then
-            echo -e "\n${BLUE}=== Copy Summary ===${NC}"
+            echo -e "\n${BLUE}=== Shell Script Copy Summary ===${NC}"
             echo -e "${GREEN}Successfully copied: ${copied_sh_files} .sh files${NC}"
             if [ $failed_sh_files -gt 0 ]; then
                 echo -e "${RED}Failed: ${failed_sh_files} .sh files${NC}"
             fi
-            echo -e "Total .sh files processed: ${SH_COUNT}"
+            echo -e "Total .sh files processed: ${total_sh_files}"
+        fi
+
+        if [ "$BINARY_COUNT" -gt 0 ]; then
+            echo -e "\n${BLUE}=== Binary Copy Summary ===${NC}"
+            echo -e "${GREEN}Successfully copied: ${copied_binary_files} binary files${NC}"
+            if [ $failed_binary_files -gt 0 ]; then
+                echo -e "${RED}Failed: ${failed_binary_files} binary files${NC}"
+            fi
+            echo -e "Total binary files processed: ${total_binary_files}"
+        fi
+
+        if [ "$BASM_COUNT" -gt 0 ]; then
+            echo -e "\n${BLUE}=== BASM Files Copy Summary ===${NC}"
+            echo -e "${GREEN}Successfully copied: ${copied_basm_files} basm files${NC}"
+            if [ $failed_basm_files -gt 0 ]; then
+                echo -e "${RED}Failed: ${failed_basm_files} basm files${NC}"
+            fi
+            echo -e "Total basm files processed: ${total_basm_files}"
+            
+            # List the basm directory contents specifically
+            echo -e "\n${BLUE}=== /dev/basm Directory Contents ===${NC}"
+            if [ -d "./dev/basm" ]; then
+                ls -la "./dev/basm" 2>/dev/null | tail -n +2
+            fi
         fi
 
         echo -e "\n${GREEN}Output directory: ./dev${NC}"
@@ -427,10 +581,18 @@ compile_and_copy() {
         if [ "$SH_COUNT" -gt 0 ]; then
             echo -e "Expected .sh files: $SH_COUNT"
         fi
-        echo -e "Total files created: $(find "./dev" -type f 2>/dev/null | wc -l)"
-
-        expected_total=$((ASM_COUNT + SH_COUNT))
+        if [ "$BINARY_COUNT" -gt 0 ]; then
+            echo -e "Expected binary files: $BINARY_COUNT"
+        fi
+        if [ "$BASM_COUNT" -gt 0 ]; then
+            echo -e "Expected basm files: $BASM_COUNT"
+        fi
+        
+        expected_total=$((ASM_COUNT + SH_COUNT + BINARY_COUNT + BASM_COUNT))
         actual_total=$(find "./dev" -type f 2>/dev/null | wc -l)
+        
+        echo -e "Total files created: $actual_total"
+        
         if [ "$expected_total" -eq "$actual_total" ]; then
             echo -e "${GREEN}✓ All files were successfully created!${NC}"
         else
@@ -438,7 +600,7 @@ compile_and_copy() {
         fi
 
         echo -e "\n${GREEN}Build completed successfully!${NC}"
-        echo -e "All binaries and shell scripts are available in the ./dev directory"
+        echo -e "All binaries, shell scripts, and executables are available in the ./dev directory"
     fi
     
     return 0
@@ -553,13 +715,21 @@ main_flow() {
         # ============================================
 
         OUTPUT_JS="${PWD}/output.js" 
+        ARCH_OUTPUT="${PWD}/arch_output" 
         
         # Example: Execute a processor with the JS file as argument
         #execute_file "normal" "path/to/processor" "$JS_FILE_PATH" "$JS_ARGS"
-        execute_file "log" "./._/min/min" "$JS_FILE_PATH" 
-        execute_file "log" "./._/min/polish/functions.sh" "$OUTPUT_JS"
-        execute_file "log" "./._/min/polish/const.sh" "$OUTPUT_JS"
-        execute_file "log" "./._/min/polish/let.sh" "$OUTPUT_JS"
+        execute_file "silent" "./._/min/min" "$JS_FILE_PATH" 
+        execute_file "silent" "./._/min/polish/functions.sh" "$OUTPUT_JS"
+        execute_file "silent" "./._/min/polish/const.sh" "$OUTPUT_JS"
+        execute_file "silent" "./._/min/polish/let.sh" "$OUTPUT_JS"
+        execute_file "silent" "./build"
+        mv_file "build_output.asm" "$EXECUTION_SOURCE/build_output.asm"
+        execute_file "silent" "./arch" "$OUTPUT_JS"
+        mv_file "arch_output" "$EXECUTION_SOURCE/arch_output"
+        rm_file "$PWD/output.js"
+        execute_file "silent" "./tree/build.sh"
+        execute_file "log" "./build_output.asm"
     else
         show_usage
         exit 1

@@ -5,14 +5,17 @@
 # Added support for .sh files in addition to .asm and binaries
 # Added --verbose mode to show full logs including nested executions
 
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Set strict mode for better error handling
 set -euo pipefail
 
-# Configuration
-ARCH_OUTPUT="../arch_output"
-BASH_RUNNER="../basm/sbasm.sh"
-JS_DIR="js/"
-CHAIN_DIR="chain/"
+# Configuration - now using absolute paths based on script directory
+ARCH_OUTPUT="${SCRIPT_DIR}/../arch_output"
+BASH_RUNNER="${SCRIPT_DIR}/../basm/sbasm.sh"
+JS_DIR="${SCRIPT_DIR}/js/"
+CHAIN_DIR="${SCRIPT_DIR}/chain/"
 
 # Colors for output
 RED='\033[0;31m'
@@ -776,17 +779,22 @@ main() {
     # Record start time
     START_TIME=$(get_timestamp_ms)
     
+    # Change to script directory to ensure consistent relative paths
+    cd "$SCRIPT_DIR"
+    
     if [[ "$SILENT_MODE" == false ]]; then
         if [[ "$VERBOSE_MODE" == true ]]; then
             log_debug "Verbose mode enabled - showing detailed execution logs"
             log_debug "Script PID: $$"
-            log_debug "Current directory: $(pwd)"
+            log_debug "Script directory: $SCRIPT_DIR"
+            log_debug "Current directory after cd: $(pwd)"
             log_debug "Using BASH_RUNNER: $BASH_RUNNER"
             log_debug "ARCH_OUTPUT: $ARCH_OUTPUT"
             echo ""
         fi
         
         log_info "Starting build process..."
+        log_info "Working directory: $SCRIPT_DIR"
         log_info "Reading from: $ARCH_OUTPUT"
     fi
     
@@ -995,6 +1003,9 @@ parse_args() {
 
 # Start the main function
 parse_args "$@"
+
+# Change to script directory before checking files
+cd "$SCRIPT_DIR"
 
 if [[ -f "$ARCH_OUTPUT" ]]; then
     main

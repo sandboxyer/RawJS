@@ -13,6 +13,15 @@
 # ============================================
 VERBOSE_DEV="${VERBOSE_DEV:-false}"  # Default: completely silent
 
+# ============================================
+# GLOBAL EXECUTION PATH CONFIGURATION
+# ============================================
+# Controls where to look for files to execute
+# "dev" - uses ./dev directory (default, contains compiled binaries)
+# "source" - uses ./._ directory (contains source files, will be compiled on-demand)
+# ============================================
+EXECUTION_SOURCE="${EXECUTION_SOURCE:-dev}"  # Default: use compiled binaries from ./dev
+
 # Colors for output (only used when VERBOSE_DEV=true)
 if [ "$VERBOSE_DEV" = "true" ]; then
     RED='\033[0;31m'
@@ -36,6 +45,142 @@ dev_error() {
     if [ "$VERBOSE_DEV" = "true" ]; then
         echo -e "$@" >&2
     fi
+}
+
+# Function: Get the appropriate basm script path
+get_basm_script() {
+    local mode="$1"  # normal, silent, log
+    
+    # Base path for basm scripts
+    local basm_base="./dev/basm"
+    
+    case "$mode" in
+        "silent")
+            echo "$basm_base/sbasm.sh"
+            ;;
+        "log")
+            echo "$basm_base/logbasm.sh"
+            ;;
+        "normal"|*)
+            echo "$basm_base/basm.sh"
+            ;;
+    esac
+}
+
+# Function: Resolve file path based on EXECUTION_SOURCE
+# This is for execution files (scripts, asm, binaries) NOT for the JS file
+resolve_file_path() {
+    local file_path="$1"
+    
+    # Remove leading ./ if present
+    file_path="${file_path#./}"
+    
+    case "$EXECUTION_SOURCE" in
+        "source")
+            # Use ._ directory
+            echo "./._/$file_path"
+            ;;
+        "dev"|*)
+            # Use dev directory (default)
+            echo "./dev/$file_path"
+            ;;
+    esac
+}
+
+# Function: Execute a file using basm
+# Usage: execute_file <mode> <file_path> [additional_args...]
+#   mode: normal, silent, log
+#   file_path: path relative to dev or ._ directory
+execute_file() {
+    local mode="$1"
+    local file_path="$2"
+    shift 2
+    local additional_args="$@"
+    
+    # Get the basm script
+    local basm_script=$(get_basm_script "$mode")
+    
+    # Check if basm script exists
+    if [ ! -f "$basm_script" ]; then
+        echo -e "${RED}Error: basm script not found at $basm_script${NC}" >&2
+        return 1
+    fi
+    
+    # Make sure basm script is executable
+    chmod +x "$basm_script" 2>/dev/null
+    
+    # Resolve the full path to the file
+    local full_path=$(resolve_file_path "$file_path")
+    
+    # Check if file exists
+    if [ ! -f "$full_path" ]; then
+        echo -e "${RED}Error: File not found at $full_path${NC}" >&2
+        return 1
+    fi
+    
+    # Execute with appropriate verbosity
+    # In the execute_file function, replace the execution section with:
+
+# Execute with appropriate verbosity
+case "$mode" in
+    "silent")
+        # Silent mode: suppress all output from basm
+        if [[ "$full_path" == *.sh ]]; then
+            bash "$full_path" $additional_args 2>/dev/null
+        else
+            "$basm_script" "$full_path" $additional_args 2>/dev/null
+        fi
+        ;;
+    "log")
+        # Log mode: show execution output but not compilation logs
+        if [[ "$full_path" == *.sh ]]; then
+            bash "$full_path" $additional_args
+        else
+            "$basm_script" "$full_path" $additional_args
+        fi
+        ;;
+    "normal"|*)
+        # Normal mode: show all output
+        if [[ "$full_path" == *.sh ]]; then
+            bash "$full_path" $additional_args
+        else
+            "$basm_script" "$full_path" $additional_args
+        fi
+        ;;
+esac
+    
+    return $?
+}
+
+# Function: Execute a sequence of files
+# Usage: execute_sequence <mode> <file1> [file2] [file3...]
+execute_sequence() {
+    local mode="$1"
+    shift
+    local files=("$@")
+    local success_count=0
+    local fail_count=0
+    
+    echo -e "${BLUE}Executing sequence in ${mode} mode...${NC}"
+    
+    for file in "${files[@]}"; do
+        echo -e "${YELLOW}Executing: $file${NC}"
+        
+        if execute_file "$mode" "$file"; then
+            echo -e "${GREEN}✓ Successfully executed: $file${NC}"
+            ((success_count++))
+        else
+            echo -e "${RED}✗ Failed to execute: $file${NC}"
+            ((fail_count++))
+        fi
+        echo ""
+    done
+    
+    echo -e "${BLUE}=== Sequence Summary ===${NC}"
+    echo -e "${GREEN}Successful: $success_count${NC}"
+    echo -e "${RED}Failed: $fail_count${NC}"
+    
+    return $fail_count
 }
 
 # Function: Compile and link all .asm files and copy .sh files to /dev directory
@@ -299,30 +444,96 @@ compile_and_copy() {
     return 0
 }
 
-# Function: Your next step (add your logic here)
-# You can control verbosity independently for this function
-# myotherstep() {
-    # You can use your own verbosity control here
-    # Example: 
-    # if [ "$VERBOSE_MYSTEP" = "true" ]; then
-    #     echo "Executing myotherstep..."
-    # fi
-    
-    # Or just use regular echo (will show in normal output)
+# ============================================
+# EXECUTION STEP FUNCTIONS
+# ============================================
 
-    
-    # Add your other step logic here
-    
+# Display usage information (minimalistic)
+show_usage() {
+    echo -e "${YELLOW}Usage: bash Raw.sh <path/to/file.js> [args...]${NC}"
+}
 
-# }
+# Process the JavaScript file - just store path and args for later use
+# Usage: process_js_file <js_file_path> [js_args...]
+process_js_file() {
+    local js_file="$1"
+    shift
+    local js_args="$@"
+    
+    # Check if JS file exists (in current directory or by absolute/relative path)
+    if [ ! -f "$js_file" ]; then
+        echo -e "${RED}Error: JS file not found: $js_file${NC}" >&2
+        return 1
+    fi
+    
+    # Get absolute path for the JS file
+    local abs_js_path=$(realpath "$js_file" 2>/dev/null || echo "$(cd "$(dirname "$js_file")" && pwd)/$(basename "$js_file")")
+    
+    # Store in global variables for use in execution patterns
+    JS_FILE_PATH="$abs_js_path"
+    JS_ARGS="$js_args"
+    
+    return 0
+}
 
-# Main flow
+# ============================================
+# SEQUENCE PATTERNS (Commented Examples)
+# ============================================
+
+# Pattern 1: Execute a single file in normal mode
+# execute_file "normal" "path/to/your/file.sh"
+
+# Pattern 2: Execute a single file in silent mode
+# execute_file "silent" "path/to/your/file.asm"
+
+# Pattern 3: Execute a single file in log mode
+# execute_file "log" "path/to/your/binary"
+
+# Pattern 4: Execute multiple files in sequence with same mode
+# execute_sequence "normal" "file1.sh" "file2.asm" "file3"
+
+# Pattern 5: Mixed mode execution (using different modes for different files)
+# execute_file "silent" "setup.sh"
+# execute_file "normal" "main.asm"
+# execute_file "log" "processor"
+
+# Pattern 6: Execute with additional arguments
+# execute_file "normal" "script.sh" "--verbose" "--output=result.txt"
+
+# Pattern 7: Change execution source temporarily
+# EXECUTION_SOURCE="source" execute_file "normal" "script.sh"
+# EXECUTION_SOURCE="dev" execute_file "normal" "script.sh"
+
+# Pattern 8: Use JS file path as argument to an executable
+# execute_file "normal" "processor" "$JS_FILE_PATH" "$JS_ARGS"
+
+# Pattern 9: Conditional execution based on JS file processing
+# if process_js_file "config.js" "some-arg"; then
+#     execute_sequence "normal" "success.sh"
+# else
+#     execute_sequence "normal" "failure.sh"
+# fi
+
+# ============================================
+# MAIN FLOW
+# ============================================
+
 main_flow() {
-    # Step 1: Compile and copy only if ./dev doesn't exist (COMPLETELY SILENT)
+    # Store JS file path and arguments if provided
+    JS_FILE=""
+    JS_ARGS=""
+    
+    # Parse command line arguments
+    if [ $# -gt 0 ]; then
+        JS_FILE="$1"
+        shift
+        JS_ARGS="$@"
+    fi
+    
+    # Step 1: Compile and copy only if ./dev doesn't exist
     if [ ! -d "./dev" ]; then
         compile_and_copy
         if [ $? -ne 0 ]; then
-            # Only show error if VERBOSE_DEV=true
             if [ "$VERBOSE_DEV" = "true" ]; then
                 echo -e "${RED}Compilation failed! Exiting...${NC}"
             fi
@@ -330,9 +541,30 @@ main_flow() {
         fi
     fi
     
-    # Step 2: Run your next step (output will show normally)
-    # myotherstep
+    # Step 2: Process the JS file if provided
+    if [ -n "$JS_FILE" ]; then
+        process_js_file "$JS_FILE" $JS_ARGS
+        if [ $? -ne 0 ]; then
+            exit 1
+        fi
+        
+        # ============================================
+        # NOW EXECUTE YOUR FILES USING THE JS PATH
+        # ============================================
+
+        OUTPUT_JS="${PWD}/output.js" 
+        
+        # Example: Execute a processor with the JS file as argument
+        #execute_file "normal" "path/to/processor" "$JS_FILE_PATH" "$JS_ARGS"
+        execute_file "log" "./._/min/min" "$JS_FILE_PATH" 
+        execute_file "log" "./._/min/polish/functions.sh" "$OUTPUT_JS"
+        execute_file "log" "./._/min/polish/const.sh" "$OUTPUT_JS"
+        execute_file "log" "./._/min/polish/let.sh" "$OUTPUT_JS"
+    else
+        show_usage
+        exit 1
+    fi
 }
 
-# Execute main flow
-main_flow
+# Execute main flow with all arguments
+main_flow "$@"

@@ -4,7 +4,7 @@
 # Handles nested scopes, objects, arrays, and implicit returns.
 
 INPUT_FILE="$1"
-OUTPUT_FILE="${2:-polished.js}"
+OUTPUT_FILE="${2:-output.js}"
 
 if [ ! -f "$INPUT_FILE" ]; then
     echo "Usage: $0 <input.js> [output.js]"

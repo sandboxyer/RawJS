@@ -32,41 +32,72 @@ else
     exit 1
 fi
 
-# Function to evaluate expression with bc
+# Function to evaluate expression with proper operator precedence
 evaluate_expression() {
     local expr="$1"
     
     # Clean the expression - remove all spaces
     expr=$(echo "$expr" | tr -d '[:space:]')
     
-    # Convert hex numbers to decimal for bc
-    while [[ "$expr" =~ 0[xX][0-9a-fA-F]+ ]]; do
-        hex_match="${BASH_REMATCH[0]}"
-        hex_val="${hex_match#0x}"
-        hex_val="${hex_val#0X}"
-        dec_val=$((16#${hex_val}))
-        expr="${expr//$hex_match/$dec_val}"
+    # Convert hex numbers to decimal
+    local converted_expr=""
+    local i=0
+    local len=${#expr}
+    
+    while [ $i -lt $len ]; do
+        local char="${expr:$i:1}"
+        
+        # Check for hex number (0x or 0X)
+        if [[ "${expr:$i:2}" =~ 0[xX] ]] && [ $((i+2)) -lt $len ]; then
+            local hex_num=""
+            i=$((i+2))
+            while [ $i -lt $len ] && [[ "${expr:$i:1}" =~ [0-9a-fA-F] ]]; do
+                hex_num="${hex_num}${expr:$i:1}"
+                i=$((i+1))
+            done
+            if [ -n "$hex_num" ]; then
+                local dec_val=$((16#${hex_num}))
+                converted_expr="${converted_expr}${dec_val}"
+            fi
+            continue
+        fi
+        
+        # Check for binary number (0b or 0B)
+        if [[ "${expr:$i:2}" =~ 0[bB] ]] && [ $((i+2)) -lt $len ]; then
+            local bin_num=""
+            i=$((i+2))
+            while [ $i -lt $len ] && [[ "${expr:$i:1}" =~ [01] ]]; do
+                bin_num="${bin_num}${expr:$i:1}"
+                i=$((i+1))
+            done
+            if [ -n "$bin_num" ]; then
+                local dec_val=$((2#${bin_num}))
+                converted_expr="${converted_expr}${dec_val}"
+            fi
+            continue
+        fi
+        
+        # Check for octal number (0 followed by digits 0-7)
+        if [ "$char" = "0" ] && [ $((i+1)) -lt $len ] && [[ "${expr:$((i+1)):1}" =~ [0-7] ]]; then
+            local oct_num=""
+            while [ $i -lt $len ] && [[ "${expr:$i:1}" =~ [0-7] ]]; do
+                oct_num="${oct_num}${expr:$i:1}"
+                i=$((i+1))
+            done
+            if [ -n "$oct_num" ]; then
+                local dec_val=$((8#${oct_num}))
+                converted_expr="${converted_expr}${dec_val}"
+            fi
+            continue
+        fi
+        
+        converted_expr="${converted_expr}${char}"
+        i=$((i+1))
     done
     
-    # Convert binary numbers to decimal for bc
-    while [[ "$expr" =~ 0[bB][01]+ ]]; do
-        bin_match="${BASH_REMATCH[0]}"
-        bin_val="${bin_match#0b}"
-        bin_val="${bin_val#0B}"
-        dec_val=$((2#${bin_val}))
-        expr="${expr//$bin_match/$dec_val}"
-    done
-    
-    # Convert octal numbers to decimal for bc
-    while [[ "$expr" =~ (^|[^0-9])0[0-7]+ ]]; do
-        oct_match="${BASH_REMATCH[0]}"
-        oct_val="${oct_match#0}"
-        dec_val=$((8#${oct_val}))
-        expr="${expr//$oct_match/$dec_val}"
-    done
-    
-    # Evaluate with bc
-    local result=$(echo "scale=10; $expr" | bc 2>/dev/null)
+    # Use bc to evaluate with proper precedence
+    # bc automatically handles operator precedence correctly
+    local result=$(echo "scale=10; $converted_expr" | bc 2>/dev/null)
     
     if [ -z "$result" ]; then
         echo "0"
@@ -75,22 +106,22 @@ evaluate_expression() {
     
     # Clean up the result
     # Remove trailing zeros after decimal point
-    result=$(echo "$result" | sed -E 's/\.?0+$//')
-    
-    # If it's a whole number (no decimal point), it's an integer
-    if [[ "$result" != *"."* ]]; then
-        echo "$result"
-    else
-        # It's a float - keep the decimal part
-        echo "$result"
+    if [[ "$result" == *"."* ]]; then
+        result=$(echo "$result" | sed -E 's/\.?0+$//')
     fi
     
+    # If it became empty after removing zeros (e.g., "7."), add back the decimal
+    if [[ "$result" == *"." ]]; then
+        result="${result}0"
+    fi
+    
+    echo "$result"
     return 0
 }
 
-# Check if the expression contains operators
-if [[ "$VAR_VALUE" =~ [-+*/%()] ]]; then
-    # It's an expression - evaluate it
+# Check if the expression contains operators or parentheses
+if [[ "$VAR_VALUE" =~ [-+*/%()] ]] || [[ "$VAR_VALUE" =~ ^-?0[xXbB] ]] || [[ "$VAR_VALUE" =~ ^-?0[0-7] ]]; then
+    # It's an expression or special number format - evaluate it
     RESULT=$(evaluate_expression "$VAR_VALUE")
     
     # Check if result is an integer or float

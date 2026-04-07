@@ -38,6 +38,24 @@ get_variable_type() {
         return
     fi
     
+    # First check if there's a dedicated type field
+    if grep -q "^[[:space:]]*${var_name}_type:" "$OUTPUT_FILE"; then
+        local type_line=$(grep "^[[:space:]]*${var_name}_type:" "$OUTPUT_FILE" | head -1)
+        if [[ "$type_line" =~ "TYPE_NULL" ]]; then
+            echo "null"
+            return
+        elif [[ "$type_line" =~ "TYPE_BOOLEAN" ]]; then
+            echo "boolean"
+            return
+        elif [[ "$type_line" =~ "TYPE_UNDEFINED" ]]; then
+            echo "undefined"
+            return
+        elif [[ "$type_line" =~ "TYPE_FLOAT" ]]; then
+            echo "float"
+            return
+        fi
+    fi
+    
     # Look for variable declarations in the assembly
     local var_line=$(grep "^[[:space:]]*${var_name}[[:space:]]" "$OUTPUT_FILE" | head -1)
     
@@ -63,12 +81,21 @@ get_variable_type() {
         elif [[ "$var_line" =~ "type: undefined" ]]; then
             echo "undefined"
             return
+        elif [[ "$var_line" =~ "type: null" ]]; then
+            echo "null"
+            return
         fi
     fi
     
     # Check for boolean pattern in comment
     if [[ "$var_line" =~ "boolean:" ]] || [[ "$var_line" =~ "boolean" ]]; then
         echo "boolean"
+        return
+    fi
+    
+    # Check for null pattern in comment
+    if [[ "$var_line" =~ "null" ]] && [[ "$var_line" =~ "value" ]] || [[ "$var_line" =~ "Null" ]]; then
+        echo "null"
         return
     fi
     
@@ -84,8 +111,11 @@ get_variable_type() {
     elif [[ "$var_line" =~ db.*\'.*\' ]]; then
         echo "char"
     elif [[ "$var_line" =~ dq ]]; then
+        # Check for null in the line before assuming boolean
+        if [[ "$var_line" =~ "null" ]] || [[ "$var_line" =~ "Null" ]]; then
+            echo "null"
         # Could be integer, boolean, or float pointer
-        if [[ "$var_line" =~ dq[[:space:]]+[01][[:space:]]*$ ]] || [[ "$var_line" =~ dq[[:space:]]+[01][[:space:]]*\; ]] || [[ "$var_line" =~ "boolean" ]]; then
+        elif [[ "$var_line" =~ dq[[:space:]]+[01][[:space:]]*$ ]] || [[ "$var_line" =~ dq[[:space:]]+[01][[:space:]]*\; ]] || [[ "$var_line" =~ "boolean" ]]; then
             echo "boolean"
         else
             echo "integer"
@@ -291,6 +321,12 @@ generate_assembly_for_arg() {
                         echo "    ; Character variable: $var_name"
                         echo "    movzx rax, byte [${var_name}]"
                         echo "    mov rdx, TYPE_CHAR"
+                        echo "    call print"
+                        ;;
+                    "null")
+                        echo "    ; Null variable: $var_name"
+                        echo "    mov rax, 0"
+                        echo "    mov rdx, TYPE_NULL"
                         echo "    call print"
                         ;;
                     *)

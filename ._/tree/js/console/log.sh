@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # log.sh - Parses console.log() statements and converts them to assembly code
-# Updated to handle undefined variables properly
+# Updated to properly handle boolean literals and float variables
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -29,22 +29,6 @@ fi
 # Generate a unique label
 LOG_LABEL="log_$(date +%s%N | md5sum | cut -c1-8)"
 
-# Function to check if variable is undefined
-is_variable_undefined() {
-    local var_name="$1"
-    
-    if [ ! -f "$OUTPUT_FILE" ]; then
-        return 1
-    fi
-    
-    # Check for the undefined flag pattern
-    if grep -q "^[[:space:]]*${var_name}_defined_flag db 0" "$OUTPUT_FILE"; then
-        return 0  # true - it is undefined
-    fi
-    
-    return 1  # false - it's defined
-}
-
 # Function to get variable type from assembly code
 get_variable_type() {
     local var_name="$1"
@@ -54,87 +38,60 @@ get_variable_type() {
         return
     fi
     
-    # First check if it's undefined
-    if is_variable_undefined "$var_name"; then
-        echo "undefined"
-        return
-    fi
-    
     # Look for variable declarations in the assembly
-    # Check for different types of variables:
+    local var_line=$(grep "^[[:space:]]*${var_name}[[:space:]]" "$OUTPUT_FILE" | head -1)
     
-    # 1. String variables (db with quotes or string comment)
-    if grep -q "^[[:space:]]*${var_name}[[:space:]]*db.*\"" "$OUTPUT_FILE" || 
-       grep -q "^[[:space:]]*${var_name}[[:space:]]*db.*string" "$OUTPUT_FILE"; then
-        echo "string"
+    if [ -z "$var_line" ]; then
+        echo "unknown"
         return
     fi
     
-    # 2. Integer variables (dq for numbers)
-    if grep -q "^[[:space:]]*${var_name}[[:space:]]*dq" "$OUTPUT_FILE"; then
-        # Check if it's actually a boolean (value 0 or 1 with boolean comment)
-        local var_line=$(grep "^[[:space:]]*${var_name}[[:space:]]*dq" "$OUTPUT_FILE" | head -1)
-        if [[ "$var_line" =~ dq[[:space:]]+[01][[:space:]]*\;(.*)boolean ]] || 
-            [[ "$var_line" =~ dq[[:space:]]+[01][[:space:]]*$ ]]; then
+    # Check comment for type hints
+    if [[ "$var_line" =~ "type:" ]]; then
+        if [[ "$var_line" =~ "type: boolean" ]]; then
             echo "boolean"
-        else
+            return
+        elif [[ "$var_line" =~ "type: integer" ]] || [[ "$var_line" =~ "type: expression" ]] || [[ "$var_line" =~ "type: integer expression" ]]; then
             echo "integer"
+            return
+        elif [[ "$var_line" =~ "type: float" ]] || [[ "$var_line" =~ "type: float expression" ]]; then
+            echo "float"
+            return
+        elif [[ "$var_line" =~ "type: string" ]]; then
+            echo "string"
+            return
+        elif [[ "$var_line" =~ "type: undefined" ]]; then
+            echo "undefined"
+            return
         fi
-        return
     fi
     
-    # 3. Boolean variables (check for boolean-specific patterns)
-    if grep -q "^[[:space:]]*${var_name}[[:space:]]*dq.*;[[:space:]]*boolean" "$OUTPUT_FILE"; then
+    # Check for boolean pattern in comment
+    if [[ "$var_line" =~ "boolean:" ]] || [[ "$var_line" =~ "boolean" ]]; then
         echo "boolean"
         return
     fi
     
-    # 4. Character variables (db with single character)
-    if grep -q "^[[:space:]]*${var_name}[[:space:]]*db.*'.'" "$OUTPUT_FILE"; then
-        echo "char"
+    # Check if it's a float (has _float suffix or pointer to float)
+    if [[ "$var_line" =~ "_float" ]] || [[ "$var_line" =~ "pointer to float" ]]; then
+        echo "float"
         return
     fi
     
-    # 5. Default db variables (treat as string)
-    if grep -q "^[[:space:]]*${var_name}[[:space:]]*db" "$OUTPUT_FILE"; then
+    # Check the actual assembly directive
+    if [[ "$var_line" =~ db.*\".*\" ]] || [[ "$var_line" =~ db.*[0-9]+.*string ]]; then
         echo "string"
-        return
-    fi
-    
-    # Default to unknown
-    echo "unknown"
-}
-
-# Function to get variable value from assembly code
-get_variable_value() {
-    local var_name="$1"
-    
-    if [ ! -f "$OUTPUT_FILE" ]; then
-        echo ""
-        return
-    fi
-    
-    # Extract the line where variable is defined
-    local var_line=$(grep "^[[:space:]]*${var_name}[[:space:]]*" "$OUTPUT_FILE" | head -1)
-    
-    if [ -z "$var_line" ]; then
-        echo ""
-        return
-    fi
-    
-    # Extract the value part (after db/dq)
-    if [[ "$var_line" =~ db[[:space:]]+(.+) ]]; then
-        local value="${BASH_REMATCH[1]}"
-        # Clean up the value
-        value=$(echo "$value" | sed 's/,.*$//' | sed "s/^'//" | sed "s/'$//" | sed 's/^"//' | sed 's/"$//' | sed 's/;.*$//')
-        echo "$value"
-    elif [[ "$var_line" =~ dq[[:space:]]+(.+) ]]; then
-        local value="${BASH_REMATCH[1]}"
-        # Clean up the value (remove comments)
-        value=$(echo "$value" | sed 's/;.*$//' | sed 's/[[:space:]]*$//')
-        echo "$value"
+    elif [[ "$var_line" =~ db.*\'.*\' ]]; then
+        echo "char"
+    elif [[ "$var_line" =~ dq ]]; then
+        # Could be integer, boolean, or float pointer
+        if [[ "$var_line" =~ dq[[:space:]]+[01][[:space:]]*$ ]] || [[ "$var_line" =~ dq[[:space:]]+[01][[:space:]]*\; ]] || [[ "$var_line" =~ "boolean" ]]; then
+            echo "boolean"
+        else
+            echo "integer"
+        fi
     else
-        echo ""
+        echo "unknown"
     fi
 }
 
@@ -231,67 +188,21 @@ generate_string_constants() {
         
         # Check what type of argument this is
         case "$arg" in
-            # Boolean values
-            "true")
-                constants+="\n    ${LOG_LABEL}_bool${i} db 'true', 0"
+            "true"|"false"|"null"|"undefined")
+                # These are handled by built-in strings
                 ;;
-            "false")
-                constants+="\n    ${LOG_LABEL}_bool${i} db 'false', 0"
-                ;;
-            # Null
-            "null")
-                constants+="\n    ${LOG_LABEL}_null${i} db 'null', 0"
-                ;;
-            # Undefined
-            "undefined")
-                constants+="\n    ${LOG_LABEL}_undef${i} db 'undefined', 0"
-                ;;
-            # String literals (with quotes)
             \'*\' | \"*\")
-                # Remove surrounding quotes
+                # String literals (with quotes)
                 local stripped="${arg:1:${#arg}-2}"
                 local nasm_string=$(escape_for_nasm "$stripped")
                 constants+="\n    ${LOG_LABEL}_str${i} db $nasm_string"
                 ;;
-            # Numbers (integers and floats)
             *)
                 # Check if it's a number
                 if [[ "$arg" =~ ^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$ ]] && [[ ! "$arg" =~ ^-?0[0-9]+ ]]; then
                     # For floats, create string representation
                     if [[ "$arg" =~ \. ]] || [[ "$arg" =~ [eE] ]]; then
                         constants+="\n    ${LOG_LABEL}_num${i} db '$arg', 0"
-                    fi
-                else
-                    # Check if it's a variable
-                    if [[ "$arg" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
-                        # Get variable type
-                        local var_type=$(get_variable_type "$arg")
-                        
-                        case "$var_type" in
-                            "string")
-                                # Use existing variable, no need to create constant
-                                ;;
-                            "integer"|"boolean")
-                                # Numbers and booleans are handled in code generation
-                                ;;
-                            "char")
-                                # Character variables
-                                ;;
-                            "undefined")
-                                # Undefined variable - we'll print "undefined"
-                                constants+="\n    ${LOG_LABEL}_undef${i} db 'undefined', 0"
-                                ;;
-                            *)
-                                # Unknown type - check if variable exists in assembly
-                                if grep -q "^[[:space:]]*${arg}[[:space:]]*" "$OUTPUT_FILE"; then
-                                    # Variable exists but type is unknown
-                                    local var_value=$(get_variable_value "$arg")
-                                    if [ -n "$var_value" ]; then
-                                        constants+="\n    ${LOG_LABEL}_var${i} db '$var_value', 0"
-                                    fi
-                                fi
-                                ;;
-                        esac
                     fi
                 fi
                 ;;
@@ -301,137 +212,115 @@ generate_string_constants() {
     echo -e "$constants"
 }
 
-# Function to generate assembly code for a single argument - UPDATED FOR UNDEFINED
+# Function to generate assembly code for a single argument
 generate_assembly_for_arg() {
     local arg="$1"
     local arg_index="$2"
     
     # Check what type of argument this is
     case "$arg" in
-        # Boolean literals
         "true")
-            echo "    mov rax, ${LOG_LABEL}_bool${arg_index}"
-            echo "    mov rdx, TYPE_STRING"
+            echo "    ; Boolean literal: true"
+            echo "    mov rax, 1"
+            echo "    mov rdx, TYPE_BOOLEAN"
             echo "    call print"
             ;;
         "false")
-            echo "    mov rax, ${LOG_LABEL}_bool${arg_index}"
-            echo "    mov rdx, TYPE_STRING"
+            echo "    ; Boolean literal: false"
+            echo "    mov rax, 0"
+            echo "    mov rdx, TYPE_BOOLEAN"
             echo "    call print"
             ;;
-        # Null literal
         "null")
-            echo "    mov rax, ${LOG_LABEL}_null${arg_index}"
-            echo "    mov rdx, TYPE_STRING"
+            echo "    mov rax, 0"
+            echo "    mov rdx, TYPE_NULL"
             echo "    call print"
             ;;
-        # Undefined literal
         "undefined")
-            echo "    mov rax, ${LOG_LABEL}_undef${arg_index}"
-            echo "    mov rdx, TYPE_STRING"
+            echo "    mov rax, 0"
+            echo "    mov rdx, TYPE_UNDEFINED"
             echo "    call print"
             ;;
-        # String literals
         \'*\' | \"*\")
             echo "    mov rax, ${LOG_LABEL}_str${arg_index}"
             echo "    mov rdx, TYPE_STRING"
             echo "    call print"
             ;;
-        # Numbers and variables
         *)
             # Check if it's a number
-            if [[ "$arg" =~ ^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$ ]] && [[ ! "$arg" =~ ^-?0[0-9]+ ]]; then
-                # Check if it's a float
-                if [[ "$arg" =~ \. ]] || [[ "$arg" =~ [eE] ]]; then
-                    # Float - print as string
-                    echo "    mov rax, ${LOG_LABEL}_num${arg_index}"
-                    echo "    mov rdx, TYPE_STRING"
-                    echo "    call print"
-                else
-                    # Integer - print as number
-                    echo "    mov rax, $arg"
-                    echo "    mov rdx, TYPE_NUMBER"
-                    echo "    call print"
-                fi
+            if [[ "$arg" =~ ^-?[0-9]+$ ]] && [[ ! "$arg" =~ ^-?0[0-9]+ ]]; then
+                # Integer literal
+                echo "    mov rax, $arg"
+                echo "    mov rdx, TYPE_NUMBER"
+                echo "    call print"
+            elif [[ "$arg" =~ ^-?[0-9]*\.[0-9]+$ ]] || [[ "$arg" =~ ^-?[0-9]+[eE][-+]?[0-9]+$ ]]; then
+                # Float literal
+                echo "    mov rax, ${LOG_LABEL}_num${arg_index}"
+                echo "    mov rdx, TYPE_FLOAT"
+                echo "    call print"
             else
                 # Assume it's a variable
                 local var_name="$arg"
-                
-                # Get variable type from assembly
                 local var_type=$(get_variable_type "$var_name")
                 
-                # Map variable types to print function types
                 case "$var_type" in
-                    "undefined")
-                        echo "    ; Undefined variable: $var_name"
-                        echo "    mov rax, ${LOG_LABEL}_undef${arg_index}"
-                        echo "    mov rdx, TYPE_STRING"
-                        echo "    call print"
-                        ;;
-                    "string")
-                        echo "    mov rax, $var_name"
-                        echo "    mov rdx, TYPE_STRING"
+                    "boolean")
+                        echo "    ; Boolean variable: $var_name"
+                        echo "    mov rax, [${var_name}]"
+                        echo "    mov rdx, TYPE_BOOLEAN"
                         echo "    call print"
                         ;;
                     "integer")
-                        echo "    mov rax, [$var_name]"
+                        echo "    ; Integer variable: $var_name"
+                        echo "    mov rax, [${var_name}]"
                         echo "    mov rdx, TYPE_NUMBER"
                         echo "    call print"
                         ;;
-                    "boolean")
-                        echo "    ; Boolean variable: $var_name"
-                        echo "    mov rax, [$var_name]"
-                        echo "    mov rdx, TYPE_BOOLEAN"
+                    "float")
+                        echo "    ; Float variable: $var_name"
+                        echo "    mov rax, [${var_name}]"
+                        echo "    mov rdx, TYPE_FLOAT"
+                        echo "    call print"
+                        ;;
+                    "string")
+                        echo "    mov rax, ${var_name}"
+                        echo "    mov rdx, TYPE_STRING"
                         echo "    call print"
                         ;;
                     "char")
                         echo "    ; Character variable: $var_name"
-                        echo "    mov rax, $var_name"
+                        echo "    movzx rax, byte [${var_name}]"
                         echo "    mov rdx, TYPE_CHAR"
                         echo "    call print"
                         ;;
-                    "unknown")
-                        # Try to determine type by checking variable definition
-                        if grep -q "^[[:space:]]*${var_name}[[:space:]]*db" "$OUTPUT_FILE"; then
-                            # Looks like a string
-                            echo "    mov rax, $var_name"
-                            echo "    mov rdx, TYPE_STRING"
+                    *)
+                        # Try to find the variable
+                        if grep -q "^[[:space:]]*${var_name}_float" "$OUTPUT_FILE"; then
+                            echo "    ; Float variable (detected): $var_name"
+                            echo "    mov rax, [${var_name}]"
+                            echo "    mov rdx, TYPE_FLOAT"
                             echo "    call print"
-                        elif grep -q "^[[:space:]]*${var_name}[[:space:]]*dq" "$OUTPUT_FILE"; then
-                            # Check if it's a boolean (0 or 1)
-                            local var_value=$(get_variable_value "$var_name")
-                            if [[ "$var_value" =~ ^[01]$ ]]; then
-                                echo "    ; Boolean variable (auto-detected): $var_name"
-                                echo "    mov rax, [$var_name]"
-                                echo "    mov rdx, TYPE_BOOLEAN"
+                        elif grep -q "^[[:space:]]*${var_name}[[:space:]]*dq.*boolean" "$OUTPUT_FILE"; then
+                            echo "    ; Boolean variable (detected): $var_name"
+                            echo "    mov rax, [${var_name}]"
+                            echo "    mov rdx, TYPE_BOOLEAN"
+                            echo "    call print"
+                        elif grep -q "^[[:space:]]*${var_name}[[:space:]]" "$OUTPUT_FILE"; then
+                            # Default to treating as number if it's dq
+                            if grep -q "^[[:space:]]*${var_name}[[:space:]]*dq" "$OUTPUT_FILE"; then
+                                echo "    mov rax, [${var_name}]"
+                                echo "    mov rdx, TYPE_NUMBER"
                                 echo "    call print"
                             else
-                                # Looks like a number
-                                echo "    mov rax, [$var_name]"
-                                echo "    mov rdx, TYPE_NUMBER"
+                                echo "    mov rax, ${var_name}"
+                                echo "    mov rdx, TYPE_STRING"
                                 echo "    call print"
                             fi
                         else
-                            # Fallback - print as string
-                            echo "    ; Unknown variable type for: $var_name"
-                            echo "    mov rax, ${LOG_LABEL}_var${arg_index}"
-                            echo "    mov rdx, TYPE_STRING"
-                            echo "    call print"
-                        fi
-                        ;;
-                    *)
-                        # Variable not found in assembly, treat as literal
-                        if grep -q "^[[:space:]]*${var_name}[[:space:]]*" "$OUTPUT_FILE"; then
-                            # Variable exists but type couldn't be determined
-                            echo "    mov rax, $var_name"
-                            echo "    mov rdx, TYPE_STRING"
-                            echo "    call print"
-                        else
-                            # Not a variable - might be a typo or new variable
-                            # Print as literal string
+                            # Variable not found - print as undefined
                             echo "    ; Variable not found: $var_name"
-                            echo "    mov rax, ${LOG_LABEL}_var${arg_index}"
-                            echo "    mov rdx, TYPE_STRING"
+                            echo "    mov rax, 0"
+                            echo "    mov rdx, TYPE_UNDEFINED"
                             echo "    call print"
                         fi
                         ;;
@@ -526,28 +415,6 @@ IN_DATA_SECTION=0
 IN_START_SECTION=0
 CODE_INSERTED=0
 DATA_INSERTED=0
-HAS_NEWLINE_CONSTANT=0
-HAS_SPACE_CONSTANT=0
-HAS_TYPE_CONSTANTS=0
-
-# First check if constants exist
-if grep -q "newline db 10, 0" "$OUTPUT_FILE"; then
-    HAS_NEWLINE_CONSTANT=1
-fi
-
-if grep -q "space db ' ', 0" "$OUTPUT_FILE"; then
-    HAS_SPACE_CONSTANT=1
-fi
-
-# Check if type constants exist
-if grep -q "TYPE_STRING equ 1" "$OUTPUT_FILE"; then
-    HAS_TYPE_CONSTANTS=1
-fi
-
-# Check if boolean strings exist
-if grep -q "true_str db 'true', 0" "$OUTPUT_FILE"; then
-    HAS_TYPE_CONSTANTS=1
-fi
 
 while IFS= read -r line; do
     # Check if we're entering the data section
@@ -561,40 +428,9 @@ while IFS= read -r line; do
     if [[ "$IN_DATA_SECTION" -eq 1 ]] && [[ "$line" == section* ]]; then
         # We're leaving data section, insert our constants before leaving
         
-        # Add type constants if needed
-        if [ "$HAS_TYPE_CONSTANTS" -eq 0 ]; then
-            echo "    ; Type constants for print function" >> "$TEMP_FILE"
-            echo "    TYPE_STRING equ 1" >> "$TEMP_FILE"
-            echo "    TYPE_NUMBER equ 2" >> "$TEMP_FILE"
-            echo "    TYPE_CHAR    equ 3" >> "$TEMP_FILE"
-            echo "    TYPE_BOOLEAN equ 4" >> "$TEMP_FILE"
-            echo "    TYPE_NULL    equ 5" >> "$TEMP_FILE"
-            echo "    TYPE_UNDEFINED equ 6" >> "$TEMP_FILE"
-            echo "" >> "$TEMP_FILE"
-            echo "    ; Boolean strings" >> "$TEMP_FILE"
-            echo "    true_str db 'true', 0" >> "$TEMP_FILE"
-            echo "    false_str db 'false', 0" >> "$TEMP_FILE"
-            echo "    null_str db 'null', 0" >> "$TEMP_FILE"
-            echo "    undefined_str db 'undefined', 0" >> "$TEMP_FILE"
-            echo "    hex_prefix db '0x', 0" >> "$TEMP_FILE"
-            HAS_TYPE_CONSTANTS=1
-        fi
-        
         if [ -n "$STRING_CONSTANTS" ] && [ "$DATA_INSERTED" -eq 0 ]; then
             echo -e "$STRING_CONSTANTS" >> "$TEMP_FILE"
             DATA_INSERTED=1
-        fi
-        
-        # Add space constant if needed
-        if [ "$HAS_SPACE_CONSTANT" -eq 0 ]; then
-            echo "    space db ' ', 0" >> "$TEMP_FILE"
-            HAS_SPACE_CONSTANT=1
-        fi
-        
-        # Add newline constant if needed
-        if [ "$HAS_NEWLINE_CONSTANT" -eq 0 ]; then
-            echo "    newline db 10, 0" >> "$TEMP_FILE"
-            HAS_NEWLINE_CONSTANT=1
         fi
         
         IN_DATA_SECTION=0
@@ -629,38 +465,7 @@ fi
 
 # If we're still in data section at EOF, append constants
 if [[ "$IN_DATA_SECTION" -eq 1 ]] && [ -n "$STRING_CONSTANTS" ] && [ "$DATA_INSERTED" -eq 0 ]; then
-    # Add type constants first if needed
-    if [ "$HAS_TYPE_CONSTANTS" -eq 0 ]; then
-        echo "    ; Type constants for print function" >> "$TEMP_FILE"
-        echo "    TYPE_STRING equ 1" >> "$TEMP_FILE"
-        echo "    TYPE_NUMBER equ 2" >> "$TEMP_FILE"
-        echo "    TYPE_CHAR    equ 3" >> "$TEMP_FILE"
-        echo "    TYPE_BOOLEAN equ 4" >> "$TEMP_FILE"
-        echo "    TYPE_NULL    equ 5" >> "$TEMP_FILE"
-        echo "    TYPE_UNDEFINED equ 6" >> "$TEMP_FILE"
-        echo "" >> "$TEMP_FILE"
-        echo "    ; Boolean strings" >> "$TEMP_FILE"
-        echo "    true_str db 'true', 0" >> "$TEMP_FILE"
-        echo "    false_str db 'false', 0" >> "$TEMP_FILE"
-        echo "    null_str db 'null', 0" >> "$TEMP_FILE"
-        echo "    undefined_str db 'undefined', 0" >> "$TEMP_FILE"
-        echo "    hex_prefix db '0x', 0" >> "$TEMP_FILE"
-        HAS_TYPE_CONSTANTS=1
-    fi
-    
     echo -e "$STRING_CONSTANTS" >> "$TEMP_FILE"
-    
-    # Add space constant if needed
-    if [ "$HAS_SPACE_CONSTANT" -eq 0 ]; then
-        echo "    space db ' ', 0" >> "$TEMP_FILE"
-        HAS_SPACE_CONSTANT=1
-    fi
-    
-    # Add newline constant if needed
-    if [ "$HAS_NEWLINE_CONSTANT" -eq 0 ]; then
-        echo "    newline db 10, 0" >> "$TEMP_FILE"
-        HAS_NEWLINE_CONSTANT=1
-    fi
 fi
 
 # Replace the original file

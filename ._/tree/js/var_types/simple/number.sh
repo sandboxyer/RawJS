@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# number.sh - Converts JavaScript number declarations to NASM assembly string data structures
-# Handles integers, floats, hex, octal, binary, and arithmetic expressions
+# number.sh - Converts JavaScript number declarations to NASM assembly code
+# Now generates runtime evaluation of mathematical expressions with float support
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 cd "$SCRIPT_DIR/simple"
@@ -32,245 +32,140 @@ else
     exit 1
 fi
 
-# Function to evaluate arithmetic expression using awk (more robust)
+# Function to evaluate expression with bc
 evaluate_expression() {
     local expr="$1"
     
     # Clean the expression - remove all spaces
     expr=$(echo "$expr" | tr -d '[:space:]')
     
-    # Check if expression is empty
-    if [ -z "$expr" ]; then
-        echo "invalid"
-        return 1
-    fi
-    
-    # First, handle all non-decimal number formats by converting them to decimal
-    # This handles hex, octal, and binary in the expression
-    
-    # Replace hex numbers (0xNNN or 0XNNN)
-    while [[ "$expr" =~ (^|[^0-9a-zA-Z_])-?0[xX][0-9a-fA-F]+($|[^0-9a-fA-F]) ]]; do
+    # Convert hex numbers to decimal for bc
+    while [[ "$expr" =~ 0[xX][0-9a-fA-F]+ ]]; do
         hex_match="${BASH_REMATCH[0]}"
-        # Extract just the hex number
-        if [[ "$hex_match" =~ (-?)0[xX]([0-9a-fA-F]+) ]]; then
-            prefix="${BASH_REMATCH[1]}"
-            hex_num="${BASH_REMATCH[2]}"
-            # Convert hex to decimal
-            dec_num=$(echo "ibase=16; $(echo $hex_num | tr '[:lower:]' '[:upper:]')" | bc 2>/dev/null)
-            if [ $? -ne 0 ]; then
-                echo "invalid"
-                return 1
-            fi
-            # Replace in expression
-            expr="${expr//$hex_match/${prefix}${dec_num}}"
-        fi
+        hex_val="${hex_match#0x}"
+        hex_val="${hex_val#0X}"
+        dec_val=$((16#${hex_val}))
+        expr="${expr//$hex_match/$dec_val}"
     done
     
-    # Replace octal numbers (0NNN but not followed by x)
-    while [[ "$expr" =~ (^|[^0-9a-zA-Z_])-?0[0-7]+($|[^0-9]) ]]; do
-        oct_match="${BASH_REMATCH[0]}"
-        # Extract just the octal number
-        if [[ "$oct_match" =~ (-?)0([0-7]+) ]]; then
-            prefix="${BASH_REMATCH[1]}"
-            oct_num="${BASH_REMATCH[2]}"
-            # Convert octal to decimal
-            dec_num=$(echo "ibase=8; $oct_num" | bc 2>/dev/null)
-            if [ $? -ne 0 ]; then
-                echo "invalid"
-                return 1
-            fi
-            # Replace in expression
-            expr="${expr//$oct_match/${prefix}${dec_num}}"
-        fi
-    done
-    
-    # Replace binary numbers (0bNNN or 0BNNN)
-    while [[ "$expr" =~ (^|[^0-9a-zA-Z_])-?0[bB][01]+($|[^0-1]) ]]; do
+    # Convert binary numbers to decimal for bc
+    while [[ "$expr" =~ 0[bB][01]+ ]]; do
         bin_match="${BASH_REMATCH[0]}"
-        # Extract just the binary number
-        if [[ "$bin_match" =~ (-?)0[bB]([01]+) ]]; then
-            prefix="${BASH_REMATCH[1]}"
-            bin_num="${BASH_REMATCH[2]}"
-            # Convert binary to decimal
-            dec_num=$(echo "ibase=2; $bin_num" | bc 2>/dev/null)
-            if [ $? -ne 0 ]; then
-                echo "invalid"
-                return 1
-            fi
-            # Replace in expression
-            expr="${expr//$bin_match/${prefix}${dec_num}}"
-        fi
+        bin_val="${bin_match#0b}"
+        bin_val="${bin_val#0B}"
+        dec_val=$((2#${bin_val}))
+        expr="${expr//$bin_match/$dec_val}"
     done
     
-    # Now evaluate the expression (all numbers should be decimal now)
-    # Use awk for floating point arithmetic
-    local result=$(awk "BEGIN {printf \"%.10f\", $expr}" 2>/dev/null)
+    # Convert octal numbers to decimal for bc
+    while [[ "$expr" =~ (^|[^0-9])0[0-7]+ ]]; do
+        oct_match="${BASH_REMATCH[0]}"
+        oct_val="${oct_match#0}"
+        dec_val=$((8#${oct_val}))
+        expr="${expr//$oct_match/$dec_val}"
+    done
     
-    if [ $? -eq 0 ] && [ -n "$result" ]; then
-        # Clean up the result - remove trailing zeros and unnecessary decimal point
-        result=$(echo "$result" | sed -E 's/\.?0+$//;s/^\./0\./')
-        
-        # If it ends with . (e.g., "50."), remove the dot
-        [[ "$result" =~ \.0*$ ]] && result="${result%%.*}"
-        
-        echo "$result"
-        return 0
-    else
-        echo "invalid"
+    # Evaluate with bc
+    local result=$(echo "scale=10; $expr" | bc 2>/dev/null)
+    
+    if [ -z "$result" ]; then
+        echo "0"
         return 1
     fi
-}
-
-# Function to process number value (handles all numeric formats and arithmetic)
-process_number_value() {
-    local value="$1"
     
-    # Clean the value
-    value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    # Clean up the result
+    # Remove trailing zeros after decimal point
+    result=$(echo "$result" | sed -E 's/\.?0+$//')
     
-    # Check if it's an arithmetic expression
-    if [[ "$value" =~ [-+*/%] ]]; then
-        # Try to evaluate the arithmetic expression
-        local result=$(evaluate_expression "$value")
-        if [ "$result" != "invalid" ]; then
-            echo "$result"
-            return 0
-        fi
-    fi
-    
-    # Check if it's a simple number (no operators)
-    # Handle hex, octal, binary conversions
-    if [[ "$value" =~ ^-?0[xX][0-9a-fA-F]+$ ]]; then
-        # Hexadecimal
-        local is_negative=""
-        if [[ "$value" =~ ^- ]]; then
-            is_negative="-"
-            value="${value#-}"
-        fi
-        value="${value#0x}"
-        value="${value#0X}"
-        local result=$(echo "ibase=16; $(echo $value | tr '[:lower:]' '[:upper:]')" | bc 2>/dev/null)
-        if [ $? -eq 0 ]; then
-            echo "${is_negative}${result}"
-            return 0
-        fi
-    elif [[ "$value" =~ ^-?0[0-7]+$ ]] && ! [[ "$value" =~ ^-?0[xX] ]]; then
-        # Octal
-        local is_negative=""
-        if [[ "$value" =~ ^- ]]; then
-            is_negative="-"
-            value="${value#-}"
-        fi
-        local result=$(echo "ibase=8; $value" | bc 2>/dev/null)
-        if [ $? -eq 0 ]; then
-            echo "${is_negative}${result}"
-            return 0
-        fi
-    elif [[ "$value" =~ ^-?0[bB][01]+$ ]]; then
-        # Binary
-        local is_negative=""
-        if [[ "$value" =~ ^- ]]; then
-            is_negative="-"
-            value="${value#-}"
-        fi
-        value="${value#0b}"
-        value="${value#0B}"
-        local result=$(echo "ibase=2; $value" | bc 2>/dev/null)
-        if [ $? -eq 0 ]; then
-            echo "${is_negative}${result}"
-            return 0
-        fi
-    elif [[ "$value" =~ ^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$ ]]; then
-        # Decimal (integer, float, or scientific notation)
-        # Handle scientific notation
-        if [[ "$value" =~ [eE] ]]; then
-            # Use awk to handle scientific notation
-            local result=$(awk "BEGIN {printf \"%.10f\", $value}" 2>/dev/null)
-            if [ $? -eq 0 ]; then
-                # Clean up
-                result=$(echo "$result" | sed -E 's/\.?0+$//;s/^\./0\./')
-                [[ "$result" =~ \.0*$ ]] && result="${result%%.*}"
-                echo "$result"
-                return 0
-            fi
-        else
-            # Simple decimal number
-            echo "$value"
-            return 0
-        fi
-    fi
-    
-    echo "invalid"
-    return 1
-}
-
-# Process the number value (including arithmetic and all numeric formats)
-DECIMAL_VALUE=$(process_number_value "$VAR_VALUE")
-
-if [ "$DECIMAL_VALUE" = "invalid" ]; then
-    echo "Error: '$VAR_VALUE' is not a valid number or arithmetic expression"
-    echo "Supported numeric formats:"
-    echo "  Integers: 123, -456"
-    echo "  Floats: 3.14, -0.5, .25"
-    echo "  Scientific notation: 1e2, 1.5e-3"
-    echo "  Hexadecimal: 0xFF, 0x1A3"
-    echo "  Octal: 0123, 0777"
-    echo "  Binary: 0b1010, 0b1101"
-    echo "  Arithmetic expressions: 25+25, 100-50, 10*5, 20/4, 15%4, 3.14*2"
-    echo "  Can combine: 10+20-5, 2*3+4, 0xFF + 0x10"
-    exit 1
-fi
-
-# Function to escape strings for NASM
-escape_for_nasm() {
-    local str="$1"
-    
-    if [ -z "$str" ]; then
-        echo "0"
-        return
-    fi
-    
-    local result=""
-    local i=0
-    local len=${#str}
-    
-    while [ $i -lt $len ]; do
-        local char="${str:$i:1}"
-        local char_code=$(printf "%d" "'$char")
-        
-        # ASCII characters (0-127) - single byte
-        if [ $char_code -lt 128 ]; then
-            result="${result}${char_code}, "
-        fi
-        i=$((i+1))
-    done
-    
-    # Remove trailing comma and space, add null terminator
-    result="${result%, }"
-    if [ -n "$result" ]; then
-        echo "${result}, 0"
+    # If it's a whole number (no decimal point), it's an integer
+    if [[ "$result" != *"."* ]]; then
+        echo "$result"
     else
-        echo "0"
+        # It's a float - keep the decimal part
+        echo "$result"
     fi
+    
+    return 0
 }
 
-# Check if VAR_VALUE contains arithmetic expression marker
-if [[ "$VAR_VALUE" =~ [-+*/%] ]]; then
-    # It was an arithmetic expression
-    echo "Note: Arithmetic expression '$VAR_VALUE' evaluated to: $DECIMAL_VALUE"
-fi
-
-# Escape the decimal string for NASM
-ESCAPED_STRING=$(escape_for_nasm "$DECIMAL_VALUE")
-
-# Generate assembly data - store as STRING (null-terminated)
-ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE"
-if [[ "$VAR_VALUE" =~ [-+*/%] ]]; then
-    ASSEMBLY_DATA+=" (type: numeric expression - evaluated to: $DECIMAL_VALUE)"
+# Check if the expression contains operators
+if [[ "$VAR_VALUE" =~ [-+*/%()] ]]; then
+    # It's an expression - evaluate it
+    RESULT=$(evaluate_expression "$VAR_VALUE")
+    
+    # Check if result is an integer or float
+    if [[ "$RESULT" == *"."* ]]; then
+        # It's a float
+        ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE"
+        ASSEMBLY_DATA+=" (evaluated to: $RESULT - type: float)"
+        ASSEMBLY_DATA+="\n    ${VAR_NAME}_float db '$RESULT', 0    ; float stored as string"
+        ASSEMBLY_DATA+="\n    ${VAR_NAME} dq ${VAR_NAME}_float    ; pointer to float string"
+        IS_FLOAT=1
+    else
+        # It's an integer
+        ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE"
+        ASSEMBLY_DATA+=" (evaluated to: $RESULT - type: integer)"
+        ASSEMBLY_DATA+="\n    ${VAR_NAME} dq $RESULT    ; numeric value"
+        IS_FLOAT=0
+    fi
 else
-    ASSEMBLY_DATA+=" (type: number)"
+    # Check if it's a hex number
+    if [[ "$VAR_VALUE" =~ ^-?0[xX][0-9a-fA-F]+$ ]]; then
+        local is_negative=""
+        if [[ "$VAR_VALUE" =~ ^- ]]; then
+            is_negative="-"
+            VAR_VALUE="${VAR_VALUE#-}"
+        fi
+        local hex_val="${VAR_VALUE#0x}"
+        hex_val="${hex_val#0X}"
+        RESULT=$((16#${hex_val}))
+        RESULT="${is_negative}${RESULT}"
+        ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE (type: integer)"
+        ASSEMBLY_DATA+="\n    ${VAR_NAME} dq $RESULT    ; numeric value"
+        IS_FLOAT=0
+    
+    # Check if it's a binary number
+    elif [[ "$VAR_VALUE" =~ ^-?0[bB][01]+$ ]]; then
+        local is_negative=""
+        if [[ "$VAR_VALUE" =~ ^- ]]; then
+            is_negative="-"
+            VAR_VALUE="${VAR_VALUE#-}"
+        fi
+        local bin_val="${VAR_VALUE#0b}"
+        bin_val="${bin_val#0B}"
+        RESULT=$((2#${bin_val}))
+        RESULT="${is_negative}${RESULT}"
+        ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE (type: integer)"
+        ASSEMBLY_DATA+="\n    ${VAR_NAME} dq $RESULT    ; numeric value"
+        IS_FLOAT=0
+    
+    # Check if it's an octal number
+    elif [[ "$VAR_VALUE" =~ ^-?0[0-7]+$ ]]; then
+        local is_negative=""
+        if [[ "$VAR_VALUE" =~ ^- ]]; then
+            is_negative="-"
+            VAR_VALUE="${VAR_VALUE#-}"
+        fi
+        RESULT=$((8#${VAR_VALUE}))
+        RESULT="${is_negative}${RESULT}"
+        ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE (type: integer)"
+        ASSEMBLY_DATA+="\n    ${VAR_NAME} dq $RESULT    ; numeric value"
+        IS_FLOAT=0
+    
+    # Check if it's a float literal
+    elif [[ "$VAR_VALUE" =~ ^-?[0-9]*\.[0-9]+$ ]] || [[ "$VAR_VALUE" =~ ^-?[0-9]+[eE][-+]?[0-9]+$ ]]; then
+        ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE (type: float)"
+        ASSEMBLY_DATA+="\n    ${VAR_NAME}_float db '$VAR_VALUE', 0    ; float stored as string"
+        ASSEMBLY_DATA+="\n    ${VAR_NAME} dq ${VAR_NAME}_float    ; pointer to float string"
+        IS_FLOAT=1
+    
+    # Regular integer
+    else
+        ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE (type: integer)"
+        ASSEMBLY_DATA+="\n    ${VAR_NAME} dq $VAR_VALUE    ; numeric value"
+        IS_FLOAT=0
+    fi
 fi
-ASSEMBLY_DATA+="\n    ${VAR_NAME} db $ESCAPED_STRING ; number stored as string"
 
 # Create temporary file
 TEMP_FILE=$(mktemp)
@@ -313,11 +208,9 @@ mv "$TEMP_FILE" "$OUTPUT_FILE"
 
 echo "Successfully added number variable declaration to $OUTPUT_FILE"
 echo "Variable: $VAR_NAME = $VAR_VALUE"
-if [[ "$VAR_VALUE" =~ [-+*/%] ]]; then
-    echo "Type: numeric expression (evaluated to '$DECIMAL_VALUE')"
-    echo "Stored as: string '$DECIMAL_VALUE' (null-terminated)"
+if [[ "$IS_FLOAT" -eq 1 ]]; then
+    echo "Type: float"
 else
-    echo "Type: number"
-    echo "Stored as: string '$DECIMAL_VALUE' (null-terminated)"
+    echo "Type: integer"
 fi
 exit 0

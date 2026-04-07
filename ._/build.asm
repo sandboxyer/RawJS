@@ -16,15 +16,17 @@ section .data
              db "    COLOR_BRIGHT  db 27, '[1m', 0", 10
              db "    COLOR_DARK    db 27, '[2m', 0", 10
              db "    COLOR_GREEN   db 27, '[32m', 0", 10
-             db "    COLOR_GRAY    db 27, '[90m', 0", 10, 10
+             db "    COLOR_GRAY    db 27, '[90m', 0   ; Dark gray", 10
+             db "    COLOR_BLUE    db 27, '[34m', 0", 10, 10
              
              db "    ; Type constants for print function", 10
-             db "    TYPE_STRING equ 1", 10
-             db "    TYPE_NUMBER equ 2", 10
-             db "    TYPE_CHAR    equ 3", 10
-             db "    TYPE_BOOLEAN equ 4", 10
-             db "    TYPE_NULL    equ 5", 10
-             db "    TYPE_UNDEFINED equ 6", 10, 10
+             db "    TYPE_STRING    equ 1", 10
+             db "    TYPE_NUMBER    equ 2", 10
+             db "    TYPE_CHAR      equ 3", 10
+             db "    TYPE_BOOLEAN   equ 4", 10
+             db "    TYPE_NULL      equ 5", 10
+             db "    TYPE_UNDEFINED equ 6", 10
+             db "    TYPE_FLOAT     equ 7", 10, 10
              
              db "    ; Boolean strings", 10
              db "    true_str db 'true', 0", 10
@@ -32,6 +34,10 @@ section .data
              db "    null_str db 'null', 0", 10
              db "    undefined_str db 'undefined', 0", 10
              db "    hex_prefix db '0x', 0", 10, 10
+             
+             db "    ; Common utility strings", 10
+             db "    space db ' ', 0", 10
+             db "    newline db 10, 0", 10, 10
              
              db "section .bss", 10
              db "    print_buffer resb 32", 10
@@ -75,10 +81,12 @@ section .data
              db "    dec rsi", 10
              db "    mov rcx, 10", 10
              db "    cmp rax, 0", 10
-             db "    jne .convert", 10
-             db "    mov byte [rsi], '0'", 10
-             db "    dec rsi", 10
-             db "    jmp .print", 10
+             db "    jge .convert", 10
+             db "    neg rax", 10
+             db "    push rax", 10
+             db "    mov byte [rsi], '-'", 10
+             db "    pop rax", 10
+             db "    jmp .convert", 10
              db ".convert:", 10
              db "    xor rdx, rdx", 10
              db "    div rcx", 10
@@ -104,6 +112,8 @@ section .data
              db "    je .print_string", 10
              db "    cmp rdx, TYPE_NUMBER", 10
              db "    je .print_number", 10
+             db "    cmp rdx, TYPE_FLOAT", 10
+             db "    je .print_float", 10
              db "    cmp rdx, TYPE_CHAR", 10
              db "    je .print_char", 10
              db "    cmp rdx, TYPE_BOOLEAN", 10
@@ -130,6 +140,23 @@ section .data
              db "    mov rsi, COLOR_GREEN", 10
              db "    call print_raw_string", 10
              db "    call print_raw_number", 10
+             db "    mov rsi, COLOR_RESET", 10
+             db "    call print_raw_string", 10
+             db "    pop rax", 10
+             db "    pop rsi", 10
+             db "    ret", 10
+             
+             db ".print_float:", 10
+             db "    push rsi", 10
+             db "    push rax", 10
+             db "    mov rsi, COLOR_BRIGHT", 10
+             db "    call print_raw_string", 10
+             db "    mov rsi, COLOR_GREEN", 10
+             db "    call print_raw_string", 10
+             db "    pop rax", 10
+             db "    push rax", 10
+             db "    mov rsi, rax", 10
+             db "    call print_raw_string", 10
              db "    mov rsi, COLOR_RESET", 10
              db "    call print_raw_string", 10
              db "    pop rax", 10

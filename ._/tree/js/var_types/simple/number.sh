@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# number.sh - Converts JavaScript number declarations to NASM assembly string data structures
+# number.sh - Converts JavaScript number declarations to NASM assembly numeric data structures
 # Handles integers, floats, hex, octal, binary, and arithmetic expressions
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
@@ -221,56 +221,29 @@ if [ "$DECIMAL_VALUE" = "invalid" ]; then
     exit 1
 fi
 
-# Function to escape strings for NASM
-escape_for_nasm() {
-    local str="$1"
-    
-    if [ -z "$str" ]; then
-        echo "0"
-        return
-    fi
-    
-    local result=""
-    local i=0
-    local len=${#str}
-    
-    while [ $i -lt $len ]; do
-        local char="${str:$i:1}"
-        local char_code=$(printf "%d" "'$char")
-        
-        # ASCII characters (0-127) - single byte
-        if [ $char_code -lt 128 ]; then
-            result="${result}${char_code}, "
-        fi
-        i=$((i+1))
-    done
-    
-    # Remove trailing comma and space, add null terminator
-    result="${result%, }"
-    if [ -n "$result" ]; then
-        echo "${result}, 0"
+# Check if it's an integer (no decimal point)
+if [[ "$DECIMAL_VALUE" =~ ^-?[0-9]+$ ]]; then
+    # It's an integer - store as numeric value using dq
+    ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE"
+    if [[ "$VAR_VALUE" =~ [-+*/%] ]]; then
+        ASSEMBLY_DATA+=" (type: numeric expression - evaluated to: $DECIMAL_VALUE)"
     else
-        echo "0"
+        ASSEMBLY_DATA+=" (type: number)"
     fi
-}
-
-# Check if VAR_VALUE contains arithmetic expression marker
-if [[ "$VAR_VALUE" =~ [-+*/%] ]]; then
-    # It was an arithmetic expression
-    echo "Note: Arithmetic expression '$VAR_VALUE' evaluated to: $DECIMAL_VALUE"
-fi
-
-# Escape the decimal string for NASM
-ESCAPED_STRING=$(escape_for_nasm "$DECIMAL_VALUE")
-
-# Generate assembly data - store as STRING (null-terminated)
-ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE"
-if [[ "$VAR_VALUE" =~ [-+*/%] ]]; then
-    ASSEMBLY_DATA+=" (type: numeric expression - evaluated to: $DECIMAL_VALUE)"
+    ASSEMBLY_DATA+="\n    ${VAR_NAME} dq $DECIMAL_VALUE    ; numeric value"
 else
-    ASSEMBLY_DATA+=" (type: number)"
+    # It's a float - store as string since NASM doesn't have native float dq for non-integers
+    # For floats, we need to store as string and print as string
+    ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE"
+    if [[ "$VAR_VALUE" =~ [-+*/%] ]]; then
+        ASSEMBLY_DATA+=" (type: float expression - evaluated to: $DECIMAL_VALUE)"
+    else
+        ASSEMBLY_DATA+=" (type: float)"
+    fi
+    ASSEMBLY_DATA+="\n    ${VAR_NAME}_float db '$DECIMAL_VALUE', 0    ; float stored as string"
+    # Also create a pointer variable
+    ASSEMBLY_DATA+="\n    ${VAR_NAME} dq ${VAR_NAME}_float    ; pointer to float string"
 fi
-ASSEMBLY_DATA+="\n    ${VAR_NAME} db $ESCAPED_STRING ; number stored as string"
 
 # Create temporary file
 TEMP_FILE=$(mktemp)
@@ -313,11 +286,9 @@ mv "$TEMP_FILE" "$OUTPUT_FILE"
 
 echo "Successfully added number variable declaration to $OUTPUT_FILE"
 echo "Variable: $VAR_NAME = $VAR_VALUE"
-if [[ "$VAR_VALUE" =~ [-+*/%] ]]; then
-    echo "Type: numeric expression (evaluated to '$DECIMAL_VALUE')"
-    echo "Stored as: string '$DECIMAL_VALUE' (null-terminated)"
+if [[ "$DECIMAL_VALUE" =~ ^-?[0-9]+$ ]]; then
+    echo "Type: integer (stored as numeric value: $DECIMAL_VALUE)"
 else
-    echo "Type: number"
-    echo "Stored as: string '$DECIMAL_VALUE' (null-terminated)"
+    echo "Type: float (stored as string: '$DECIMAL_VALUE')"
 fi
 exit 0

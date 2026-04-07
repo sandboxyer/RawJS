@@ -366,16 +366,17 @@ fi
 if [[ -d "$INSTALL_DIR" ]]; then
   log_message "Existing installation found at: $INSTALL_DIR"
   echo "Choose an option:"
-  echo "  1 = Update (keep existing files)"
-  echo "  2 = Remove (uninstall completely)"
+  echo "  1 = Update"
+  echo "  2 = Remove"
   echo "  3 = Exit"
   read -p "Enter your choice [1-3]: " choice
   
   case "$choice" in
     1) 
-      # Backup existing installation
-      log_message "Backing up existing installation..."
-      mv -f "$INSTALL_DIR" "$BACKUP_DIR"
+      # Completely remove existing installation
+      log_message "Removing existing installation for clean update..."
+      remove_installation
+      log_message "Clean removal completed. Proceeding with fresh installation..."
       ;;
     2) 
       remove_installation

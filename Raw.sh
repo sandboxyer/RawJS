@@ -7,10 +7,19 @@
 # ============================================
 CALLER_DIR="$(pwd)"  # Save where the script was called from
 
+# Check for special flags FIRST before processing JS file
+SPECIAL_MODE=""
+if [ $# -gt 0 ]; then
+    if [ "$1" = "--test" ] || [ "$1" = "--reset" ]; then
+        SPECIAL_MODE="$1"
+        shift  # Remove the flag from arguments
+    fi
+fi
+
 # Process JS file argument BEFORE changing directories
 JS_FILE=""
 JS_ARGS=""
-if [ $# -gt 0 ]; then
+if [ $# -gt 0 ] && [ -z "$SPECIAL_MODE" ]; then
     # Resolve JS file path relative to caller's directory
     if [[ "$1" = /* ]]; then
         # Absolute path
@@ -640,6 +649,8 @@ compile_and_copy() {
 # Display usage information (minimalistic)
 show_usage() {
     echo -e "${YELLOW}Usage: bash Raw.sh <path/to/file.js> [args...]${NC}"
+    echo -e "${YELLOW}       bash Raw.sh --reset${NC}"
+    echo -e "${YELLOW}       bash Raw.sh --test${NC}"
 }
 
 # Process the JavaScript file - just store path and args for later use
@@ -663,6 +674,67 @@ process_js_file() {
     JS_ARGS="$js_args"
     
     return 0
+}
+
+# ============================================
+# SPECIAL MODE HANDLERS
+# ============================================
+
+# Handle --reset mode
+handle_reset() {
+    echo -e "${YELLOW}Resetting /dev directory...${NC}"
+    
+    # Remove the dev directory
+    rm -rf "$SCRIPT_DIR/dev" 2>/dev/null
+    
+    # Run compilation
+    compile_and_copy
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}Reset completed successfully! /dev directory has been rebuilt.${NC}"
+        return 0
+    else
+        echo -e "${RED}Reset failed during compilation!${NC}"
+        return 1
+    fi
+}
+
+# Handle --test mode
+handle_test() {
+    echo -e "${YELLOW}Running test mode...${NC}"
+    
+    # First reset (delete and rebuild dev)
+    echo -e "${BLUE}Step 1: Resetting /dev directory...${NC}"
+    rm -rf "$SCRIPT_DIR/dev" 2>/dev/null
+    compile_and_copy
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Test failed: Could not rebuild /dev directory!${NC}"
+        return 1
+    fi
+    
+    # Then execute the test script
+    echo -e "${BLUE}Step 2: Executing test script...${NC}"
+    local test_script="$SCRIPT_DIR/dev/._/._/runtest.sh"
+    
+    if [ ! -f "$test_script" ]; then
+        echo -e "${RED}Error: Test script not found at $test_script${NC}"
+        return 1
+    fi
+    
+    # Make it executable
+    chmod +x "$test_script" 2>/dev/null
+    
+    # Execute with bash
+    echo -e "${GREEN}Running test script...${NC}"
+    bash "$test_script"
+    local test_result=$?
+    
+    if [ $test_result -eq 0 ]; then
+        echo -e "${GREEN}Tests completed successfully!${NC}"
+    else
+        echo -e "${RED}Tests failed with exit code: $test_result${NC}"
+    fi
+    
+    return $test_result
 }
 
 # ============================================
@@ -708,7 +780,17 @@ process_js_file() {
 # ============================================
 
 main_flow() {
-    # Step 1: Compile and copy only if ./dev doesn't exist (based on script's directory)
+    # Step 1: Check for special modes FIRST
+    if [ "$SPECIAL_MODE" = "--reset" ]; then
+        handle_reset
+        exit $?
+    elif [ "$SPECIAL_MODE" = "--test" ]; then
+        handle_test
+        exit $?
+    fi
+    
+    # Step 2: Normal execution flow (only if no special mode)
+    # Compile and copy only if ./dev doesn't exist (based on script's directory)
     if [ ! -d "$SCRIPT_DIR/dev" ]; then
         compile_and_copy
         if [ $? -ne 0 ]; then
@@ -719,7 +801,7 @@ main_flow() {
         fi
     fi
     
-    # Step 2: Process the JS file if provided
+    # Step 3: Process the JS file if provided
     if [ -n "$JS_FILE" ]; then
         process_js_file "$JS_FILE" $JS_ARGS
         if [ $? -ne 0 ]; then

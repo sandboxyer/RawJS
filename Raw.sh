@@ -3,10 +3,34 @@
 # Raw.sh - Main build script with conditional compilation (silent mode)
 
 # ============================================
+# SAVE CALLER'S DIRECTORY AND RESOLVE JS FILE FIRST
+# ============================================
+CALLER_DIR="$(pwd)"  # Save where the script was called from
+
+# Process JS file argument BEFORE changing directories
+JS_FILE=""
+JS_ARGS=""
+if [ $# -gt 0 ]; then
+    # Resolve JS file path relative to caller's directory
+    if [[ "$1" = /* ]]; then
+        # Absolute path
+        JS_FILE="$1"
+    else
+        # Relative path - resolve from caller's directory
+        JS_FILE="$CALLER_DIR/$1"
+    fi
+    shift
+    JS_ARGS="$@"
+fi
+
+# ============================================
 # GET SCRIPT'S OWN DIRECTORY (not caller's directory)
 # ============================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"  # Change to script's directory to ensure consistent paths
+
+# Now JS_FILE contains the absolute path to the JS file from caller's perspective
+# The rest of the script continues exactly as before...
 
 # ============================================
 # VERBOSITY CONTROL FOR DEV COMPILATION STEP
@@ -625,7 +649,7 @@ process_js_file() {
     shift
     local js_args="$@"
     
-    # Check if JS file exists (in current directory or by absolute/relative path)
+    # Check if JS file exists
     if [ ! -f "$js_file" ]; then
         echo -e "${RED}Error: JS file not found: $js_file${NC}" >&2
         return 1
@@ -684,17 +708,6 @@ process_js_file() {
 # ============================================
 
 main_flow() {
-    # Store JS file path and arguments if provided
-    JS_FILE=""
-    JS_ARGS=""
-    
-    # Parse command line arguments
-    if [ $# -gt 0 ]; then
-        JS_FILE="$1"
-        shift
-        JS_ARGS="$@"
-    fi
-    
     # Step 1: Compile and copy only if ./dev doesn't exist (based on script's directory)
     if [ ! -d "$SCRIPT_DIR/dev" ]; then
         compile_and_copy

@@ -9,9 +9,19 @@ CALLER_DIR="$(pwd)"  # Save where the script was called from
 
 # Check for special flags FIRST before processing JS file
 SPECIAL_MODE=""
+FORCE_LOG_MODE="false"  # New flag for --log (only for normal JS execution)
+
 if [ $# -gt 0 ]; then
     if [ "$1" = "--test" ] || [ "$1" = "--reset" ]; then
         SPECIAL_MODE="$1"
+        shift  # Remove the flag from arguments
+    fi
+fi
+
+# Only check for --log if we're NOT in a special mode
+if [ -z "$SPECIAL_MODE" ] && [ $# -gt 0 ]; then
+    if [ "$1" = "--log" ]; then
+        FORCE_LOG_MODE="true"
         shift  # Remove the flag from arguments
     fi
 fi
@@ -136,6 +146,11 @@ execute_file() {
     shift 2
     local additional_args="$@"
     
+    # Override mode if FORCE_LOG_MODE is true (only affects normal JS execution)
+    if [ "$FORCE_LOG_MODE" = "true" ]; then
+        mode="log"
+    fi
+    
     # Get the basm script
     local basm_script=$(get_basm_script "$mode")
     
@@ -196,6 +211,11 @@ execute_sequence() {
     local files=("$@")
     local success_count=0
     local fail_count=0
+    
+    # Override mode if FORCE_LOG_MODE is true (only affects normal JS execution)
+    if [ "$FORCE_LOG_MODE" = "true" ]; then
+        mode="log"
+    fi
     
     echo -e "${BLUE}Executing sequence in ${mode} mode...${NC}"
     
@@ -648,7 +668,7 @@ compile_and_copy() {
 
 # Display usage information (minimalistic)
 show_usage() {
-    echo -e "${YELLOW}Usage: bash Raw.sh <path/to/file.js> [args...]${NC}"
+    echo -e "${YELLOW}Usage: bash Raw.sh [--log] <path/to/file.js> [args...]${NC}"
     echo -e "${YELLOW}       bash Raw.sh --reset${NC}"
     echo -e "${YELLOW}       bash Raw.sh --test${NC}"
 }

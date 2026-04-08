@@ -4,6 +4,8 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m'
 
 if [ $# -ne 1 ]; then
@@ -13,6 +15,7 @@ fi
 
 JS_FILE="$1"
 RAW_SCRIPT="../../../Raw.sh"
+FILENAME=$(basename "$JS_FILE")
 
 # Function to strip ANSI color codes
 strip_colors() {
@@ -24,61 +27,62 @@ normalize() {
     strip_colors | sed 's/\r$//' | sed 's/[[:space:]]*$//' | grep -v '^$'
 }
 
-echo -e "${BLUE}Running Node.js...${NC}"
+# Run tests silently
 NODE_OUTPUT=$(node "$JS_FILE" 2>&1 | normalize)
-
-echo -e "${BLUE}Running Raw.sh...${NC}"
 RAW_OUTPUT=$(bash "$RAW_SCRIPT" "$JS_FILE" 2>&1 | normalize)
 
 # Compare normalized outputs
 if diff -bBw <(echo "$NODE_OUTPUT") <(echo "$RAW_OUTPUT") >/dev/null 2>&1; then
-    echo -e "\n${GREEN}✓ EQUAL - Outputs match perfectly${NC}"
-    echo -e "${GREEN}  (ANSI color codes were ignored in comparison)${NC}"
+    echo -e "${GREEN}✓ ${BOLD}${FILENAME}${NC}${GREEN} - 100% match${NC}"
     exit 0
 else
-    echo -e "\n${RED}✗ DIFFERENCES DETECTED${NC}"
+    # Header with filename and overall status
+    echo -e "\n${RED}✗ ${BOLD}${FILENAME}${NC}${RED} - Differences detected${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
-    # Calculate line-by-line similarity
-    NODE_LINES=$(echo "$NODE_OUTPUT" | wc -l)
-    RAW_LINES=$(echo "$RAW_OUTPUT" | wc -l)
-    
-    # Count matching lines
-    MATCH=0
-    MAX_LINES=$NODE_LINES
-    if [ $RAW_LINES -gt $MAX_LINES ]; then
-        MAX_LINES=$RAW_LINES
-    fi
-    
-    # Create arrays for comparison
+    # Calculate similarity
     mapfile -t node_arr <<< "$NODE_OUTPUT"
     mapfile -t raw_arr <<< "$RAW_OUTPUT"
     
-    for i in $(seq 0 $((${#node_arr[@]} - 1))); do
-        if [ "${node_arr[$i]}" = "${raw_arr[$i]}" ]; then
-            MATCH=$((MATCH + 1))
-        fi
+    NODE_LINES=${#node_arr[@]}
+    RAW_LINES=${#raw_arr[@]}
+    MAX_LINES=$((NODE_LINES > RAW_LINES ? NODE_LINES : RAW_LINES))
+    
+    MATCH=0
+    for i in "${!node_arr[@]}"; do
+        [[ $i -lt ${#raw_arr[@]} ]] && [[ "${node_arr[$i]}" == "${raw_arr[$i]}" ]] && ((MATCH++))
     done
     
     SIMILARITY=$((MATCH * 100 / MAX_LINES))
     
-    echo -e "${YELLOW}Similarity: ${SIMILARITY}%${NC}"
-    echo -e "${YELLOW}Matching lines: ${MATCH}/${MAX_LINES}${NC}\n"
+    # Stats in compact format
+    echo -e "${YELLOW}Match: ${SIMILARITY}% (${MATCH}/${MAX_LINES} lines)${NC}"
     
-    # Show differences
-    echo -e "${BLUE}=== Differences (content only, colors ignored) ===${NC}"
-    diff -y --suppress-common-lines -W 60 \
-        <(echo "$NODE_OUTPUT") \
-        <(echo "$RAW_OUTPUT") | head -20
+    # Show differences in a cleaner format
+    if [[ $NODE_LINES -ne $RAW_LINES ]]; then
+        echo -e "${YELLOW}Line count: Node.js=${NODE_LINES}, Raw.sh=${RAW_LINES}${NC}"
+    fi
     
-    # Show which lines differ
-    echo -e "\n${BLUE}=== Line-by-line comparison ===${NC}"
-    for i in $(seq 0 $((${#node_arr[@]} - 1))); do
-        if [ "${node_arr[$i]}" != "${raw_arr[$i]}" ]; then
-            echo -e "${RED}Line $((i+1)) differs:${NC}"
-            echo -e "  Node.js: ${node_arr[$i]}"
-            echo -e "  Raw.sh:  ${raw_arr[$i]}"
+    echo -e "\n${BLUE}Differences:${NC}"
+    
+    # Side-by-side diff with better formatting
+    for i in "${!node_arr[@]}"; do
+        if [[ $i -ge ${#raw_arr[@]} ]]; then
+            echo -e "${RED}Line $((i+1)) only in Node.js:${NC}"
+            echo -e "  ${node_arr[$i]}"
+        elif [[ "${node_arr[$i]}" != "${raw_arr[$i]}" ]]; then
+            echo -e "${YELLOW}Line $((i+1)):${NC}"
+            echo -e "  ${CYAN}Node:${NC} ${node_arr[$i]}"
+            echo -e "  ${CYAN}Raw :${NC} ${raw_arr[$i]}"
         fi
     done
     
+    # Lines only in Raw output
+    for i in $(seq ${#node_arr[@]} $((RAW_LINES - 1))); do
+        echo -e "${RED}Line $((i+1)) only in Raw.sh:${NC}"
+        echo -e "  ${raw_arr[$i]}"
+    done
+    
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
     exit 1
 fi

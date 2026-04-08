@@ -35,91 +35,66 @@ fi
 # Function to determine primitive type
 determine_type() {
     local value="$1"
-    
     # Trim whitespace
     value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     
-    # Check for null
+    # 1. Check for null / undefined
     if [ "$value" = "null" ]; then
         echo "null"
         return
     fi
-    
-    # Check for undefined
     if [ "$value" = "undefined" ]; then
         echo "undefined"
         return
     fi
     
-    # Check for boolean
+    # 2. Check for boolean
     if [ "$value" = "true" ] || [ "$value" = "false" ]; then
         echo "boolean"
         return
     fi
     
-    # FIRST: Check for string (most specific checks first)
-    # If it contains quotes at all, it's definitely a string
+    # 3. If it contains any quotes, it's definitely a string
     if [[ "$value" =~ [\"\'] ]]; then
         echo "string"
         return
     fi
     
-    # Check for concatenation with + (string concatenation)
-    # If it contains + and non-numeric content, it's a string
-    if [[ "$value" =~ \+ ]]; then
-        # Split by + to check each part
-        IFS='+' read -ra PARTS <<< "$value"
-        for part in "${PARTS[@]}"; do
-            part=$(echo "$part" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-            # If any part contains letters or is not a valid number, it's a string
-            if [[ "$part" =~ [a-zA-Z_] ]] || ! [[ "$part" =~ ^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$ ]]; then
-                echo "string"
-                return
-            fi
-        done
-        # All parts are numbers, so it's an arithmetic expression
+    # 4. Check for arithmetic expressions (including + as operator)
+    # Remove all whitespace for pattern matching
+    local clean_val=$(echo "$value" | sed 's/[[:space:]]//g')
+    
+    # Pattern for a valid arithmetic expression:
+    # Optional leading minus, then number (integer/decimal/exponent),
+    # then zero or more (operator followed by number).
+    # Operators allowed: + - * / %
+    if [[ "$clean_val" =~ ^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?([-+*/%][0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?)*$ ]]; then
         echo "number"
         return
     fi
     
-    # Check for arithmetic expressions (only - * / %)
-    if [[ "$value" =~ [\-\*/%] ]]; then
-        # Remove all spaces and check if it's a valid arithmetic expression
-        local clean_val=$(echo "$value" | sed 's/[[:space:]]//g')
-        # Check if it matches pattern: number operator number (operator number)*
-        # Now includes decimal points and scientific notation
-        if [[ "$clean_val" =~ ^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?([\-\*/%][0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?)*$ ]]; then
-            echo "number"
-            return
-        fi
-    fi
-    
-    # Check for pure number (any numeric format) - no operators
-    # Check for hexadecimal
+    # 5. Check for pure numbers (hex, octal, binary, decimal, float) without operators
+    # Hex: 0x... or 0X...
     if [[ "$value" =~ ^-?0[xX][0-9a-fA-F]+$ ]]; then
         echo "number"
         return
     fi
-    
-    # Check for octal
+    # Octal: 0...
     if [[ "$value" =~ ^-?0[0-7]+$ ]]; then
         echo "number"
         return
     fi
-    
-    # Check for binary
+    # Binary: 0b... or 0B...
     if [[ "$value" =~ ^-?0[bB][01]+$ ]]; then
         echo "number"
         return
     fi
-    
-    # Check for decimal integer
+    # Decimal integer
     if [[ "$value" =~ ^-?[0-9]+$ ]]; then
         echo "number"
         return
     fi
-    
-    # Check for float/decimal (including scientific notation)
+    # Float / scientific notation (without operators)
     if [[ "$value" =~ ^-?[0-9]+\.[0-9]+$ ]] || 
        [[ "$value" =~ ^-?[0-9]+\.[0-9]*[eE][-+]?[0-9]+$ ]] || 
        [[ "$value" =~ ^-?[0-9]*\.[0-9]+$ ]] ||
@@ -128,15 +103,17 @@ determine_type() {
         return
     fi
     
-    # Check for variable reference (single identifier)
+    # 6. Check for variable reference (single identifier)
     if [[ "$value" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
         echo "reference"
         return
     fi
     
-    # Default to string for anything else
+    # 7. Default to string (includes concatenation like "hello" + "world" which would have been caught
+    #    by quotes earlier, or expressions with mixed types that JavaScript would coerce to string)
     echo "string"
 }
+
 
 # Determine the type of the value
 TYPE=$(determine_type "$VAR_VALUE")

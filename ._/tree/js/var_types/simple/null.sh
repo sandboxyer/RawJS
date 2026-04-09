@@ -38,8 +38,7 @@ if [[ ! "$VAR_VALUE" =~ ^[Nn]ull$ ]]; then
     exit 1
 fi
 
-# Generate assembly data for null
-# Use a separate type indicator to avoid confusion with boolean 0
+# Generate assembly data - MATCH THE FORMAT THAT log.sh EXPECTS
 ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = null (type: null)"
 ASSEMBLY_DATA+="\n    ${VAR_NAME}_type db TYPE_NULL ; Type indicator for null"
 ASSEMBLY_DATA+="\n    ${VAR_NAME} dq 0 ; Null value (0)"

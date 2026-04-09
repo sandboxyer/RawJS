@@ -31,16 +31,38 @@ LOG_ID="log_$(date +%s%N | md5sum | cut -c1-8)"
 get_type() {
     local var="$1"
     
-    # Look for type comment
-    local line=$(grep -m1 "^[[:space:]]*;.*${var}.*(type:" "$OUTPUT_FILE" 2>/dev/null)
-    if [[ "$line" =~ type:[[:space:]]*([a-z]+) ]]; then
-        echo "${BASH_REMATCH[1]}"
+    # Look for standard type comment format
+    local line=$(grep "^[[:space:]]*;.*Variable: ${var}.*(type:" "$OUTPUT_FILE" 2>/dev/null)
+    if [ -n "$line" ]; then
+        if [[ "$line" =~ type:[[:space:]]*([a-z]+) ]]; then
+            echo "${BASH_REMATCH[1]}"
+            return
+        fi
+    fi
+    
+    # Check for specific patterns in the file
+    if grep -q "^[[:space:]]*${var}_type db TYPE_NULL" "$OUTPUT_FILE" 2>/dev/null; then
+        echo "null"
         return
     fi
     
-    # Check if variable exists at all
-    if grep -q "^[[:space:]]*${var}[[:space:]]" "$OUTPUT_FILE" 2>/dev/null; then
-        echo "integer"  # Default
+    if grep -q "^[[:space:]]*${var}_defined_flag db 0" "$OUTPUT_FILE" 2>/dev/null; then
+        echo "undefined"
+        return
+    fi
+    
+    if grep -q "^[[:space:]]*${var} dq [01][[:space:]]*;.*boolean" "$OUTPUT_FILE" 2>/dev/null; then
+        echo "boolean"
+        return
+    fi
+    
+    if grep -q "^[[:space:]]*${var} db " "$OUTPUT_FILE" 2>/dev/null; then
+        echo "string"
+        return
+    fi
+    
+    if grep -q "^[[:space:]]*${var} dq " "$OUTPUT_FILE" 2>/dev/null; then
+        echo "integer"
         return
     fi
     
@@ -141,15 +163,80 @@ gen_print() {
     local arg="$1"
     local idx="$2"
     
+    # Handle literals
     case "$arg" in
         true)
             echo "    mov rax, 1"
             echo "    mov rdx, TYPE_BOOLEAN"
             echo "    call print"
+            return
             ;;
         false)
             echo "    mov rax, 0"
             echo "    mov rdx, TYPE_BOOLEAN"
+            echo "    call print"
+            return
+            ;;
+        null)
+            echo "    mov rax, 0"
+            echo "    mov rdx, TYPE_NULL"
+            echo "    call print"
+            return
+            ;;
+        undefined)
+            echo "    mov rax, 0"
+            echo "    mov rdx, TYPE_UNDEFINED"
+            echo "    call print"
+            return
+            ;;
+    esac
+    
+    # Handle string literals
+    if [[ "$arg" =~ ^\".*\"$ ]] || [[ "$arg" =~ ^\'.*\'$ ]]; then
+        echo "    mov rax, ${LOG_ID}_str${idx}"
+        echo "    mov rdx, TYPE_STRING"
+        echo "    call print"
+        return
+    fi
+    
+    # Handle numeric literals
+    if [[ "$arg" =~ ^-?[0-9]+$ ]]; then
+        echo "    mov rax, $arg"
+        echo "    mov rdx, TYPE_NUMBER"
+        echo "    call print"
+        return
+    fi
+    
+    # Handle float literals
+    if [[ "$arg" =~ ^-?[0-9]*\.[0-9]+$ ]] || [[ "$arg" =~ ^-?[0-9]+[eE][-+]?[0-9]+$ ]]; then
+        echo "    mov rax, ${LOG_ID}_float${idx}"
+        echo "    mov rdx, TYPE_FLOAT"
+        echo "    call print"
+        return
+    fi
+    
+    # Must be a variable - get its type
+    local vtype=$(get_type "$arg")
+    
+    case "$vtype" in
+        integer)
+            echo "    mov rax, [${arg}]"
+            echo "    mov rdx, TYPE_NUMBER"
+            echo "    call print"
+            ;;
+        float)
+            echo "    mov rax, [${arg}]"
+            echo "    mov rdx, TYPE_FLOAT"
+            echo "    call print"
+            ;;
+        boolean)
+            echo "    mov rax, [${arg}]"
+            echo "    mov rdx, TYPE_BOOLEAN"
+            echo "    call print"
+            ;;
+        string)
+            echo "    mov rax, ${arg}"
+            echo "    mov rdx, TYPE_STRING"
             echo "    call print"
             ;;
         null)
@@ -162,56 +249,12 @@ gen_print() {
             echo "    mov rdx, TYPE_UNDEFINED"
             echo "    call print"
             ;;
-        \"*\"|\'*\')
-            echo "    mov rax, ${LOG_ID}_str${idx}"
-            echo "    mov rdx, TYPE_STRING"
-            echo "    call print"
-            ;;
-        -*[0-9]*|+[0-9]*|[0-9]*)
-            if [[ "$arg" =~ \. ]] || [[ "$arg" =~ [eE] ]]; then
-                echo "    mov rax, ${LOG_ID}_float${idx}"
-                echo "    mov rdx, TYPE_FLOAT"
-                echo "    call print"
-            else
-                echo "    mov rax, $arg"
-                echo "    mov rdx, TYPE_NUMBER"
-                echo "    call print"
-            fi
-            ;;
         *)
-            local vtype=$(get_type "$arg")
-            case "$vtype" in
-                integer)
-                    echo "    mov rax, [${arg}]"
-                    echo "    mov rdx, TYPE_NUMBER"
-                    echo "    call print"
-                    ;;
-                float)
-                    echo "    mov rax, [${arg}]"
-                    echo "    mov rdx, TYPE_FLOAT"
-                    echo "    call print"
-                    ;;
-                boolean)
-                    echo "    mov rax, [${arg}]"
-                    echo "    mov rdx, TYPE_BOOLEAN"
-                    echo "    call print"
-                    ;;
-                string)
-                    echo "    mov rax, ${arg}"
-                    echo "    mov rdx, TYPE_STRING"
-                    echo "    call print"
-                    ;;
-                null)
-                    echo "    mov rax, 0"
-                    echo "    mov rdx, TYPE_NULL"
-                    echo "    call print"
-                    ;;
-                *)
-                    echo "    mov rax, 0"
-                    echo "    mov rdx, TYPE_UNDEFINED"
-                    echo "    call print"
-                    ;;
-            esac
+            # Default fallback - try to treat as number
+            echo "    ; Warning: Unknown type for variable '${arg}', treating as undefined"
+            echo "    mov rax, 0"
+            echo "    mov rdx, TYPE_UNDEFINED"
+            echo "    call print"
             ;;
     esac
 }

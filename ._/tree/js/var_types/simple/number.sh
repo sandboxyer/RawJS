@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # number.sh - Converts JavaScript number declarations to NASM assembly code
-# Now generates runtime evaluation of mathematical expressions with float support
+# Generates runtime evaluation code for expressions.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 cd "$SCRIPT_DIR/simple"
@@ -16,232 +16,270 @@ fi
 
 # Read and clean the input
 INPUT_CONTENT=$(cat "$INPUT_FILE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
-# Remove trailing semicolon if present
 INPUT_CONTENT="${INPUT_CONTENT%;}"
 
 # Extract variable name and value
 if [[ "$INPUT_CONTENT" =~ ^var[[:space:]]+([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
     VAR_NAME="${BASH_REMATCH[1]}"
     VAR_VALUE="${BASH_REMATCH[2]}"
-    # Remove surrounding whitespace
     VAR_VALUE=$(echo "$VAR_VALUE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 else
     echo "Error: Invalid variable declaration format"
-    echo "Expected format: var variableName = value"
     exit 1
 fi
 
-# Function to evaluate expression with proper operator precedence
-evaluate_expression() {
+# ----------------------------------------------------------------------
+# Helper: check if expression contains operators or parentheses
+# ----------------------------------------------------------------------
+has_operators() {
+    [[ "$1" =~ [\+\-\*/%\(\)] ]]
+}
+
+# ----------------------------------------------------------------------
+# Tokenizer - returns array of tokens (type:value)
+# ----------------------------------------------------------------------
+tokenize() {
     local expr="$1"
-    
-    # Clean the expression - remove all spaces
-    expr=$(echo "$expr" | tr -d '[:space:]')
-    
-    # Convert hex numbers to decimal
-    local converted_expr=""
+    local tokens=()
     local i=0
     local len=${#expr}
     
     while [ $i -lt $len ]; do
-        local char="${expr:$i:1}"
+        local c="${expr:$i:1}"
         
-        # Check for hex number (0x or 0X)
-        if [[ "${expr:$i:2}" =~ 0[xX] ]] && [ $((i+2)) -lt $len ]; then
-            local hex_num=""
-            i=$((i+2))
-            while [ $i -lt $len ] && [[ "${expr:$i:1}" =~ [0-9a-fA-F] ]]; do
-                hex_num="${hex_num}${expr:$i:1}"
-                i=$((i+1))
-            done
-            if [ -n "$hex_num" ]; then
-                local dec_val=$((16#${hex_num}))
-                converted_expr="${converted_expr}${dec_val}"
-            fi
+        # Skip whitespace
+        if [[ "$c" =~ [[:space:]] ]]; then
+            i=$((i+1))
             continue
         fi
         
-        # Check for binary number (0b or 0B)
-        if [[ "${expr:$i:2}" =~ 0[bB] ]] && [ $((i+2)) -lt $len ]; then
-            local bin_num=""
-            i=$((i+2))
-            while [ $i -lt $len ] && [[ "${expr:$i:1}" =~ [01] ]]; do
-                bin_num="${bin_num}${expr:$i:1}"
+        # Number
+        if [[ "$c" =~ [0-9] ]]; then
+            local num="$c"
+            i=$((i+1))
+            while [ $i -lt $len ] && [[ "${expr:$i:1}" =~ [0-9] ]]; do
+                num="${num}${expr:$i:1}"
                 i=$((i+1))
             done
-            if [ -n "$bin_num" ]; then
-                local dec_val=$((2#${bin_num}))
-                converted_expr="${converted_expr}${dec_val}"
-            fi
+            tokens+=("NUM:$num")
             continue
         fi
         
-        # Check for octal number (0 followed by digits 0-7)
-        if [ "$char" = "0" ] && [ $((i+1)) -lt $len ] && [[ "${expr:$((i+1)):1}" =~ [0-7] ]]; then
-            local oct_num=""
-            while [ $i -lt $len ] && [[ "${expr:$i:1}" =~ [0-7] ]]; do
-                oct_num="${oct_num}${expr:$i:1}"
+        # Operators and parentheses
+        case "$c" in
+            '+'|'-'|'*'|'/'|'%'|'('|')')
+                tokens+=("OP:$c")
                 i=$((i+1))
-            done
-            if [ -n "$oct_num" ]; then
-                local dec_val=$((8#${oct_num}))
-                converted_expr="${converted_expr}${dec_val}"
-            fi
-            continue
-        fi
-        
-        converted_expr="${converted_expr}${char}"
-        i=$((i+1))
+                ;;
+            *)
+                echo "Error: Unexpected character '$c'" >&2
+                exit 1
+                ;;
+        esac
     done
     
-    # Use bc to evaluate with proper precedence
-    # bc automatically handles operator precedence correctly
-    local result=$(echo "scale=10; $converted_expr" | bc 2>/dev/null)
-    
-    if [ -z "$result" ]; then
-        echo "0"
-        return 1
-    fi
-    
-    # Clean up the result
-    # Remove trailing zeros after decimal point
-    if [[ "$result" == *"."* ]]; then
-        result=$(echo "$result" | sed -E 's/\.?0+$//')
-    fi
-    
-    # If it became empty after removing zeros (e.g., "7."), add back the decimal
-    if [[ "$result" == *"." ]]; then
-        result="${result}0"
-    fi
-    
-    echo "$result"
-    return 0
+    printf '%s\n' "${tokens[@]}"
 }
 
-# Check if the expression contains operators or parentheses
-if [[ "$VAR_VALUE" =~ [-+*/%()] ]] || [[ "$VAR_VALUE" =~ ^-?0[xXbB] ]] || [[ "$VAR_VALUE" =~ ^-?0[0-7] ]]; then
-    # It's an expression or special number format - evaluate it
-    RESULT=$(evaluate_expression "$VAR_VALUE")
+# ----------------------------------------------------------------------
+# Shunting-yard algorithm - infix to postfix (RPN)
+# ----------------------------------------------------------------------
+precedence() {
+    case "$1" in
+        '+'|'-') echo 1 ;;
+        '*'|'/'|'%') echo 2 ;;
+        *) echo 0 ;;
+    esac
+}
+
+to_rpn() {
+    local tokens=("$@")
+    local output=()
+    local stack=()
     
-    # Check if result is an integer or float
-    if [[ "$RESULT" == *"."* ]]; then
-        # It's a float
-        ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE"
-        ASSEMBLY_DATA+=" (evaluated to: $RESULT - type: float)"
-        ASSEMBLY_DATA+="\n    ${VAR_NAME}_float db '$RESULT', 0    ; float stored as string"
-        ASSEMBLY_DATA+="\n    ${VAR_NAME} dq ${VAR_NAME}_float    ; pointer to float string"
-        IS_FLOAT=1
-    else
-        # It's an integer
-        ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE"
-        ASSEMBLY_DATA+=" (evaluated to: $RESULT - type: integer)"
-        ASSEMBLY_DATA+="\n    ${VAR_NAME} dq $RESULT    ; numeric value"
-        IS_FLOAT=0
-    fi
+    for token in "${tokens[@]}"; do
+        local type="${token%%:*}"
+        local val="${token#*:}"
+        
+        if [ "$type" = "NUM" ]; then
+            output+=("$token")
+        elif [ "$type" = "OP" ]; then
+            case "$val" in
+                '(')
+                    stack+=("$token")
+                    ;;
+                ')')
+                    while [ ${#stack[@]} -gt 0 ] && [ "${stack[-1]#*:}" != "(" ]; do
+                        output+=("${stack[-1]}")
+                        unset 'stack[-1]'
+                    done
+                    [ ${#stack[@]} -gt 0 ] && unset 'stack[-1]'  # Remove '('
+                    ;;
+                *)
+                    local prec=$(precedence "$val")
+                    while [ ${#stack[@]} -gt 0 ]; do
+                        local top="${stack[-1]}"
+                        local top_op="${top#*:}"
+                        [ "$top_op" = "(" ] && break
+                        local top_prec=$(precedence "$top_op")
+                        [ $top_prec -lt $prec ] && break
+                        output+=("$top")
+                        unset 'stack[-1]'
+                    done
+                    stack+=("$token")
+                    ;;
+            esac
+        fi
+    done
+    
+    while [ ${#stack[@]} -gt 0 ]; do
+        output+=("${stack[-1]}")
+        unset 'stack[-1]'
+    done
+    
+    printf '%s\n' "${output[@]}"
+}
+
+# ----------------------------------------------------------------------
+# Generate assembly code from RPN tokens
+# ----------------------------------------------------------------------
+generate_asm() {
+    local rpn_tokens=("$@")
+    local code=""
+    
+    code="${code}    ; Runtime evaluation of: $VAR_VALUE"$'\n'
+    
+    for token in "${rpn_tokens[@]}"; do
+        local type="${token%%:*}"
+        local val="${token#*:}"
+        
+        if [ "$type" = "NUM" ]; then
+            code="${code}    push $val"$'\n'
+        elif [ "$type" = "OP" ]; then
+            case "$val" in
+                '+')
+                    code="${code}    pop rbx"$'\n'
+                    code="${code}    pop rax"$'\n'
+                    code="${code}    add rax, rbx"$'\n'
+                    code="${code}    push rax"$'\n'
+                    ;;
+                '-')
+                    code="${code}    pop rbx"$'\n'
+                    code="${code}    pop rax"$'\n'
+                    code="${code}    sub rax, rbx"$'\n'
+                    code="${code}    push rax"$'\n'
+                    ;;
+                '*')
+                    code="${code}    pop rbx"$'\n'
+                    code="${code}    pop rax"$'\n'
+                    code="${code}    imul rbx"$'\n'
+                    code="${code}    push rax"$'\n'
+                    ;;
+                '/')
+                    code="${code}    xor rdx, rdx"$'\n'
+                    code="${code}    pop rbx"$'\n'
+                    code="${code}    pop rax"$'\n'
+                    code="${code}    idiv rbx"$'\n'
+                    code="${code}    push rax"$'\n'
+                    ;;
+                '%')
+                    code="${code}    xor rdx, rdx"$'\n'
+                    code="${code}    pop rbx"$'\n'
+                    code="${code}    pop rax"$'\n'
+                    code="${code}    idiv rbx"$'\n'
+                    code="${code}    push rdx"$'\n'
+                    ;;
+            esac
+        fi
+    done
+    
+    code="${code}    pop rax"$'\n'
+    code="${code}    mov [${VAR_NAME}], rax"$'\n'
+    
+    echo "$code"
+}
+
+# ----------------------------------------------------------------------
+# Main logic
+# ----------------------------------------------------------------------
+DATA_SECTION=""
+CODE_SECTION=""
+
+# Handle different value types
+if [[ "$VAR_VALUE" =~ ^-?0[xX][0-9a-fA-F]+$ ]] || \
+   [[ "$VAR_VALUE" =~ ^-?0[bB][01]+$ ]] || \
+   [[ "$VAR_VALUE" =~ ^-?0[0-7]+$ ]]; then
+    # Hex/Binary/Octal literal
+    DATA_SECTION="    ; Variable: $VAR_NAME = $VAR_VALUE (type: integer)"$'\n'
+    DATA_SECTION="${DATA_SECTION}    ${VAR_NAME} dq $VAR_VALUE"$'\n'
+
+elif [[ "$VAR_VALUE" =~ ^-?[0-9]*\.[0-9]+$ ]] || [[ "$VAR_VALUE" =~ ^-?[0-9]+[eE][-+]?[0-9]+$ ]]; then
+    # Float literal
+    RESULT=$(echo "scale=10; $VAR_VALUE" | bc 2>/dev/null | sed -E 's/\.?0+$//')
+    DATA_SECTION="    ; Variable: $VAR_NAME = $VAR_VALUE (type: float)"$'\n'
+    DATA_SECTION="${DATA_SECTION}    ${VAR_NAME}_float db '$RESULT', 0"$'\n'
+    DATA_SECTION="${DATA_SECTION}    ${VAR_NAME} dq ${VAR_NAME}_float"$'\n'
+
+elif has_operators "$VAR_VALUE"; then
+    # Expression - evaluate at runtime
+    mapfile -t tokens < <(tokenize "$VAR_VALUE")
+    mapfile -t rpn_tokens < <(to_rpn "${tokens[@]}")
+    CODE_SECTION=$(generate_asm "${rpn_tokens[@]}")
+    DATA_SECTION="    ; Variable: $VAR_NAME (runtime evaluated from: $VAR_VALUE) (type: integer)"$'\n'
+    DATA_SECTION="${DATA_SECTION}    ${VAR_NAME} dq 0"$'\n'
+
 else
-    # Check if it's a hex number
-    if [[ "$VAR_VALUE" =~ ^-?0[xX][0-9a-fA-F]+$ ]]; then
-        local is_negative=""
-        if [[ "$VAR_VALUE" =~ ^- ]]; then
-            is_negative="-"
-            VAR_VALUE="${VAR_VALUE#-}"
-        fi
-        local hex_val="${VAR_VALUE#0x}"
-        hex_val="${hex_val#0X}"
-        RESULT=$((16#${hex_val}))
-        RESULT="${is_negative}${RESULT}"
-        ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE (type: integer)"
-        ASSEMBLY_DATA+="\n    ${VAR_NAME} dq $RESULT    ; numeric value"
-        IS_FLOAT=0
-    
-    # Check if it's a binary number
-    elif [[ "$VAR_VALUE" =~ ^-?0[bB][01]+$ ]]; then
-        local is_negative=""
-        if [[ "$VAR_VALUE" =~ ^- ]]; then
-            is_negative="-"
-            VAR_VALUE="${VAR_VALUE#-}"
-        fi
-        local bin_val="${VAR_VALUE#0b}"
-        bin_val="${bin_val#0B}"
-        RESULT=$((2#${bin_val}))
-        RESULT="${is_negative}${RESULT}"
-        ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE (type: integer)"
-        ASSEMBLY_DATA+="\n    ${VAR_NAME} dq $RESULT    ; numeric value"
-        IS_FLOAT=0
-    
-    # Check if it's an octal number
-    elif [[ "$VAR_VALUE" =~ ^-?0[0-7]+$ ]]; then
-        local is_negative=""
-        if [[ "$VAR_VALUE" =~ ^- ]]; then
-            is_negative="-"
-            VAR_VALUE="${VAR_VALUE#-}"
-        fi
-        RESULT=$((8#${VAR_VALUE}))
-        RESULT="${is_negative}${RESULT}"
-        ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE (type: integer)"
-        ASSEMBLY_DATA+="\n    ${VAR_NAME} dq $RESULT    ; numeric value"
-        IS_FLOAT=0
-    
-    # Check if it's a float literal
-    elif [[ "$VAR_VALUE" =~ ^-?[0-9]*\.[0-9]+$ ]] || [[ "$VAR_VALUE" =~ ^-?[0-9]+[eE][-+]?[0-9]+$ ]]; then
-        ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE (type: float)"
-        ASSEMBLY_DATA+="\n    ${VAR_NAME}_float db '$VAR_VALUE', 0    ; float stored as string"
-        ASSEMBLY_DATA+="\n    ${VAR_NAME} dq ${VAR_NAME}_float    ; pointer to float string"
-        IS_FLOAT=1
-    
-    # Regular integer
-    else
-        ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $VAR_VALUE (type: integer)"
-        ASSEMBLY_DATA+="\n    ${VAR_NAME} dq $VAR_VALUE    ; numeric value"
-        IS_FLOAT=0
-    fi
+    # Simple integer
+    DATA_SECTION="    ; Variable: $VAR_NAME = $VAR_VALUE (type: integer)"$'\n'
+    DATA_SECTION="${DATA_SECTION}    ${VAR_NAME} dq $VAR_VALUE"$'\n'
 fi
 
-# Create temporary file
+# ----------------------------------------------------------------------
+# Insert into build_output.asm
+# ----------------------------------------------------------------------
 TEMP_FILE=$(mktemp)
-
-# Insert data into .data section
-IN_DATA_SECTION=0
-DATA_INSERTED=0
+IN_DATA=0
+IN_START=0
+DATA_DONE=0
+CODE_DONE=0
 
 while IFS= read -r line; do
-    # Check if we're entering the data section
+    # Track sections
     if [[ "$line" == "section .data" ]]; then
-        IN_DATA_SECTION=1
-        echo "$line" >> "$TEMP_FILE"
-        continue
-    fi
-    
-    # Check if we're leaving the data section
-    if [[ "$IN_DATA_SECTION" -eq 1 ]] && [[ "$line" == section* ]]; then
-        # We're leaving data section, insert our data before leaving
-        if [ "$DATA_INSERTED" -eq 0 ]; then
-            echo -e "$ASSEMBLY_DATA" >> "$TEMP_FILE"
-            DATA_INSERTED=1
+        IN_DATA=1
+    elif [[ "$line" == section* ]] && [ "$IN_DATA" -eq 1 ]; then
+        if [ "$DATA_DONE" -eq 0 ] && [ -n "$DATA_SECTION" ]; then
+            echo "$DATA_SECTION" >> "$TEMP_FILE"
+            DATA_DONE=1
         fi
-        
-        IN_DATA_SECTION=0
+        IN_DATA=0
     fi
     
-    # Write the current line
-    echo "$line" >> "$TEMP_FILE"
+    if [[ "$line" == "_start:" ]]; then
+        IN_START=1
+    fi
     
+    # Insert runtime code before exit syscall
+    if [ "$IN_START" -eq 1 ] && [ "$CODE_DONE" -eq 0 ] && \
+       [[ "$line" =~ ^[[:space:]]*mov[[:space:]]+rax,[[:space:]]*60 ]] && \
+       [ -n "$CODE_SECTION" ]; then
+        echo "$CODE_SECTION" >> "$TEMP_FILE"
+        CODE_DONE=1
+    fi
+    
+    echo "$line" >> "$TEMP_FILE"
 done < "$OUTPUT_FILE"
 
-# If we're still in data section at EOF, append data
-if [[ "$IN_DATA_SECTION" -eq 1 ]] && [ "$DATA_INSERTED" -eq 0 ]; then
-    echo -e "$ASSEMBLY_DATA" >> "$TEMP_FILE"
+# Handle edge cases
+if [ "$IN_DATA" -eq 1 ] && [ "$DATA_DONE" -eq 0 ] && [ -n "$DATA_SECTION" ]; then
+    echo "$DATA_SECTION" >> "$TEMP_FILE"
 fi
 
-# Replace the original file
+if [ "$CODE_DONE" -eq 0 ] && [ -n "$CODE_SECTION" ]; then
+    echo "$CODE_SECTION" >> "$TEMP_FILE"
+fi
+
 mv "$TEMP_FILE" "$OUTPUT_FILE"
 
-echo "Successfully added number variable declaration to $OUTPUT_FILE"
-echo "Variable: $VAR_NAME = $VAR_VALUE"
-if [[ "$IS_FLOAT" -eq 1 ]]; then
-    echo "Type: float"
-else
-    echo "Type: integer"
-fi
+echo "Successfully added variable $VAR_NAME = $VAR_VALUE"
 exit 0

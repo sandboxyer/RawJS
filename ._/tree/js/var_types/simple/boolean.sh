@@ -55,8 +55,7 @@ if [ "$NORMALIZED_VALUE" = "true" ]; then
     BOOLEAN_DISPLAY="true"
 fi
 
-# Generate assembly data
-# Use dq (8 bytes) for boolean variables with proper comment
+# Generate assembly data - MATCH THE FORMAT THAT log.sh EXPECTS
 ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = $BOOLEAN_DISPLAY (type: boolean)"
 ASSEMBLY_DATA+="\n    ${VAR_NAME} dq $BOOLEAN_NUMERIC    ; boolean: 0=false, 1=true"
 

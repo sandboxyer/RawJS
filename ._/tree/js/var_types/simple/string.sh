@@ -133,7 +133,7 @@ extract_string_content() {
 STRING_CONTENT=$(extract_string_content "$VAR_VALUE")
 ESCAPED_STRING=$(escape_for_nasm "$STRING_CONTENT")
 
-# Generate assembly data
+# Generate assembly data - MATCH THE FORMAT THAT log.sh EXPECTS
 ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = \"$STRING_CONTENT\" (type: string)"
 ASSEMBLY_DATA+="\n    ${VAR_NAME} db $ESCAPED_STRING ; string"
 

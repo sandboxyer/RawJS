@@ -2,7 +2,6 @@
 
 # undefined.sh - Converts JavaScript undefined declarations to NASM assembly data structures
 # In JavaScript, undefined represents a variable that has been declared but not assigned a value
-# In assembly, we represent this as a special sentinel value (0) with a flag
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 cd "$SCRIPT_DIR/simple"
@@ -39,10 +38,7 @@ if [[ ! "$VAR_VALUE" =~ ^[Uu]ndefined$ ]]; then
     exit 1
 fi
 
-# Generate assembly data for undefined
-# We represent undefined as:
-# - A special marker value (0xFFFFFFFF) to indicate undefined
-# - This allows runtime code to distinguish between empty string, null, and undefined
+# Generate assembly data - MATCH THE FORMAT THAT log.sh EXPECTS
 ASSEMBLY_DATA="\n    ; Variable: $VAR_NAME = undefined (type: undefined)"
 ASSEMBLY_DATA+="\n    ${VAR_NAME}_defined_flag db 0 ; 0 = undefined, 1 = defined"
 ASSEMBLY_DATA+="\n    ${VAR_NAME}_value dq 0 ; Placeholder for value"

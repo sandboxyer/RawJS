@@ -53,80 +53,257 @@ detect_system() {
   fi
 }
 
+# =============================================================================
+# ALPINE-SPECIFIC NASM BINARY REPLACEMENT (RUNS ONCE PER INSTALLATION SOURCE)
+# =============================================================================
+
+# This function handles the Alpine-specific NASM binary replacement
+# It only runs if Alpine is detected and the source binary exists in alpine-pack
+# After moving, the binary is no longer in alpine-pack, so it won't run again
+handle_alpine_nasm_replacement() {
+  local system_type="$1"
+  
+  # Only proceed if system is Alpine
+  if [ "$system_type" != "alpine" ]; then
+    return 0
+  fi
+  
+  log_message "Alpine Linux detected - checking for Alpine-specific NASM binary..."
+  
+  # Define paths relative to the script execution directory (REPO_DIR)
+  local alpine_pack_nasm="$REPO_DIR/._/basm/alpine-pack/nasm-x86_64-linux"
+  local target_nasm_dir="$REPO_DIR/._/basm/x86_64-linux"
+  local target_nasm="$target_nasm_dir/nasm-x86_64-linux"
+  
+  # Check if the Alpine-specific NASM binary exists in alpine-pack
+  if [ ! -f "$alpine_pack_nasm" ]; then
+    log_message "No Alpine-specific NASM binary found in alpine-pack (already processed or not present)"
+    return 0
+  fi
+  
+  log_message "Found Alpine-specific NASM binary in alpine-pack"
+  
+  # Create target directory if it doesn't exist
+  if [ ! -d "$target_nasm_dir" ]; then
+    mkdir -p "$target_nasm_dir"
+    log_message "Created target directory: $target_nasm_dir"
+  fi
+  
+  # Remove ANY existing NASM binary in target directory (both possible names)
+  if [ -f "$target_nasm_dir/nasm-x86_64-linux" ]; then
+    rm -f "$target_nasm_dir/nasm-x86_64-linux"
+    log_message "Removed existing NASM binary: nasm-x86_64-linux"
+  fi
+  
+  if [ -f "$target_nasm_dir/nasm-x86_64-linux-linux" ]; then
+    rm -f "$target_nasm_dir/nasm-x86_64-linux-linux"
+    log_message "Removed existing NASM binary: nasm-x86_64-linux-linux"
+  fi
+  
+  # Also remove any other nasm binaries that might exist
+  find "$target_nasm_dir" -maxdepth 1 -name "nasm*" -type f -exec rm -f {} \; 2>/dev/null
+  log_message "Cleaned all existing NASM binaries from target directory"
+  
+  # Move the Alpine-specific NASM binary to the target location with CORRECT name
+  mv "$alpine_pack_nasm" "$target_nasm"
+  
+  if [ $? -eq 0 ]; then
+    log_message "✓ Moved Alpine-specific NASM binary to: $target_nasm"
+    # Make it executable
+    chmod +x "$target_nasm"
+    log_message "✓ Set executable permissions on NASM binary"
+  else
+    log_message "⚠ Warning: Failed to move Alpine-specific NASM binary"
+    return 1
+  fi
+  
+  return 0
+}
+
 # Check if required commands are available
 check_command() {
   command -v "$1" >/dev/null 2>&1
 }
 
-# Install Alpine packages if needed
-install_alpine_packages() {
-  local alpine_pack_dir="$BASM_SOURCE_DIR/alpine-pack"
+# Function to install .deb packages - EXACT COPY from working EasyAI install.sh
+install_debs() {
+  local deb_dir="$BASM_SOURCE_DIR/ubuntu-pack"
   
-  # Check what's already installed
-  local need_ld=false
-  local need_bash=false
-  
-  if ! check_command ld; then
-    need_ld=true
+  if [ -d "$deb_dir" ]; then
+    deb_files=$(find "$deb_dir" -maxdepth 1 -name "*.deb" 2>/dev/null | tr '\n' ' ')
+    if [ -n "$deb_files" ]; then
+      log_message "Installing .deb packages from $deb_dir..."
+      if [ "$LOG_MODE" = true ]; then
+        sudo dpkg -i $deb_files &
+      else
+        sudo dpkg -i $deb_files > /dev/null 2>&1 &
+      fi
+      show_progress "Installing dependencies" $!
+      
+      # Run dpkg configure to fix any dependency issues
+      log_message "Configuring packages..."
+      if [ "$LOG_MODE" = true ]; then
+        sudo dpkg --configure -a &
+      else
+        sudo dpkg --configure -a > /dev/null 2>&1 &
+      fi
+      show_progress "Configuring packages" $!
+    else
+      log_message "No .deb files found in $deb_dir. Skipping .deb installation."
+    fi
+  else
+    log_message "The .deb directory ($deb_dir) does not exist. Skipping .deb installation."
   fi
+}
+
+# Function to install .apk packages - FIXED FOR ALPINE
+install_apks() {
+  local apk_dir="$BASM_SOURCE_DIR/alpine-pack"
   
-  if ! check_command bash; then
-    need_bash=true
-  fi
-  
-  # If nothing needed, return
-  if [ "$need_ld" = false ] && [ "$need_bash" = false ]; then
-    log_message "All required Alpine packages already installed"
-    return 0
-  fi
-  
-  log_message "Installing required Alpine packages..."
-  
-  # Check if apk is available
-  if ! check_command apk; then
-    echo "Warning: apk package manager not found. Cannot install Alpine packages automatically." >&2
+  if [ ! -d "$apk_dir" ]; then
+    log_message "The .apk directory ($apk_dir) does not exist. Skipping .apk installation."
     return 1
   fi
   
-  # Install packages from alpine-pack directory if they exist
-  if [ -d "$alpine_pack_dir" ]; then
-    if [ "$need_ld" = true ]; then
-      ld_apk=$(find "$alpine_pack_dir" -name "*binutils*.apk" 2>/dev/null | head -n1)
-      if [ -n "$ld_apk" ] && [ -f "$ld_apk" ]; then
-        log_message "Installing: $(basename "$ld_apk")"
-        apk add --allow-untrusted "$ld_apk" 2>&1 || {
-          echo "Warning: Failed to install $(basename "$ld_apk")" >&2
-        }
-      fi
-    fi
+  # Check if apk command exists
+  if ! check_command apk; then
+    log_message "Error: apk package manager not found"
+    return 1
+  fi
+  
+  # Get list of APK files
+  apk_files=$(find "$apk_dir" -maxdepth 1 -name "*.apk" 2>/dev/null)
+  
+  if [ -z "$apk_files" ]; then
+    log_message "No .apk files found in $apk_dir. Skipping .apk installation."
+    return 0
+  fi
+  
+  log_message "Found APK packages, installing..."
+  
+  # First installation attempt - install all packages together
+  log_message "Installing all APK packages..."
+  
+  # Build list of all APK files for bulk installation
+  all_apks=""
+  for apk_file in $apk_files; do
+    all_apks="$all_apks $apk_file"
+  done
+  
+  # Try to install all packages at once (this handles dependencies better)
+  log_message "Attempting bulk installation of all packages..."
+  if [ "$LOG_MODE" = true ]; then
+    apk add --allow-untrusted $all_apks 2>&1
+    bulk_result=$?
+  else
+    apk add --allow-untrusted $all_apks > /dev/null 2>&1
+    bulk_result=$?
+  fi
+  
+  if [ $bulk_result -eq 0 ]; then
+    log_message "✓ All packages installed successfully in bulk"
+  else
+    log_message "Bulk installation had issues, trying individual installation..."
     
-    if [ "$need_bash" = true ]; then
-      bash_apk=$(find "$alpine_pack_dir" -name "*bash*.apk" 2>/dev/null | head -n1)
-      if [ -n "$bash_apk" ] && [ -f "$bash_apk" ]; then
-        log_message "Installing: $(basename "$bash_apk")"
-        apk add --allow-untrusted "$bash_apk" 2>&1 || {
-          echo "Warning: Failed to install $(basename "$bash_apk")" >&2
-        }
+    # Individual installation attempt with retry logic
+    first_attempt_failed=false
+    
+    for apk_file in $apk_files; do
+      pkg_name=$(basename "$apk_file")
+      log_message "Installing: $pkg_name"
+      
+      if [ "$LOG_MODE" = true ]; then
+        if apk add --allow-untrusted "$apk_file" 2>&1; then
+          log_message "✓ Successfully installed: $pkg_name"
+        else
+          log_message "✗ Failed to install: $pkg_name"
+          first_attempt_failed=true
+        fi
+      else
+        if apk add --allow-untrusted "$apk_file" > /dev/null 2>&1; then
+          log_message "✓ Installed: $pkg_name"
+        else
+          log_message "✗ Failed: $pkg_name"
+          first_attempt_failed=true
+        fi
       fi
+    done
+    
+    # Second pass for failed packages (this often resolves dependency issues)
+    if [ "$first_attempt_failed" = true ]; then
+      log_message "Retrying failed packages..."
+      
+      for apk_file in $apk_files; do
+        pkg_name=$(basename "$apk_file")
+        
+        # Check if package is already installed
+        pkg_base_name=$(echo "$pkg_name" | sed 's/-[0-9].*//')
+        if apk info -e "$pkg_base_name" > /dev/null 2>&1; then
+          log_message "Package $pkg_base_name already installed, skipping"
+          continue
+        fi
+        
+        log_message "Second attempt for: $pkg_name"
+        
+        if [ "$LOG_MODE" = true ]; then
+          if apk add --allow-untrusted --force "$apk_file" 2>&1; then
+            log_message "✓ Installed on second attempt: $pkg_name"
+          else
+            log_message "✗ Still failed: $pkg_name"
+          fi
+        else
+          if apk add --allow-untrusted --force "$apk_file" > /dev/null 2>&1; then
+            log_message "✓ Installed on second attempt: $pkg_name"
+          else
+            log_message "✗ Still failed: $pkg_name"
+          fi
+        fi
+      done
     fi
   fi
   
-  # If still missing, try to install from repositories
-  if [ "$need_ld" = true ] && ! check_command ld; then
+  # Update APK cache
+  log_message "Updating APK cache..."
+  apk update > /dev/null 2>&1
+  
+  log_message "APK installation process completed."
+  return 0
+}
+
+# Install Alpine packages if needed
+install_alpine_packages() {
+  log_message "Installing required Alpine packages..."
+  
+  # First try to install from local APK files
+  install_apks
+  
+  # Then verify and install any missing packages from repositories
+  if ! check_command ld; then
     log_message "Installing binutils from Alpine repository..."
-    apk add binutils 2>&1 || echo "Warning: Failed to install binutils from repository" >&2
+    apk add --no-cache binutils 2>&1 || echo "Warning: Failed to install binutils" >&2
   fi
   
-  if [ "$need_bash" = true ] && ! check_command bash; then
+  if ! check_command bash; then
     log_message "Installing bash from Alpine repository..."
-    apk add bash 2>&1 || echo "Warning: Failed to install bash from repository" >&2
+    apk add --no-cache bash 2>&1 || echo "Warning: Failed to install bash" >&2
+  fi
+  
+  # Final verification
+  if check_command ld; then
+    log_message "✓ Linker (ld) is available"
+  else
+    log_message "⚠ Warning: Linker (ld) is not available"
+  fi
+  
+  if check_command bash; then
+    log_message "✓ Bash is available"
+  else
+    log_message "⚠ Warning: Bash is not available"
   fi
 }
 
 # Install Ubuntu packages if needed
 install_ubuntu_packages() {
-  local ubuntu_pack_dir="$BASM_SOURCE_DIR/ubuntu-pack"
-  
   # Check what's already installed
   local need_ld=false
   
@@ -142,24 +319,8 @@ install_ubuntu_packages() {
   
   log_message "Installing required Ubuntu packages..."
   
-  # Check if dpkg is available
-  if ! check_command dpkg; then
-    echo "Warning: dpkg package manager not found. Cannot install Ubuntu packages automatically." >&2
-    return 1
-  fi
-  
-  # Install packages from ubuntu-pack directory if they exist
-  if [ -d "$ubuntu_pack_dir" ] && [ "$need_ld" = true ]; then
-    # Find binutils deb package
-    deb_file=$(find "$ubuntu_pack_dir" -name "*binutils*.deb" 2>/dev/null | head -n1)
-    
-    if [ -n "$deb_file" ] && [ -f "$deb_file" ]; then
-      log_message "Installing binutils from local directory: $(basename "$deb_file")"
-      dpkg -i "$deb_file" 2>&1 || {
-        echo "Warning: Failed to install $(basename "$deb_file")" >&2
-      }
-    fi
-  fi
+  # Use the working DEB installation function
+  install_debs
   
   # If still missing, try to install from repositories
   if [ "$need_ld" = true ] && ! check_command ld; then
@@ -271,6 +432,7 @@ show_progress() {
   echo "$message completed."
 }
 
+# FIXED: Robust file copying that works without rsync
 copy_files() {
   local src_dir="$1"
   local dest_dir="$2"
@@ -279,14 +441,41 @@ copy_files() {
   mkdir -p "$dest_dir"
   log_message "Copying $description files to $dest_dir..."
 
+  # Use cp with proper options instead of rsync (more compatible)
   if [ "$LOG_MODE" = true ]; then
-    rsync -a --info=progress2 --exclude=".git" "$src_dir/" "$dest_dir" 2>&1 | tee -a "$LOG_FILE" &
+    # Verbose copy with progress indication
+    (cd "$src_dir" && find . -type f ! -path "./.git/*" | while read file; do
+      dest_file="$dest_dir/$file"
+      dest_folder=$(dirname "$dest_file")
+      mkdir -p "$dest_folder"
+      cp -v "$file" "$dest_file" 2>&1
+    done) | tee -a "$LOG_FILE" &
+    copy_pid=$!
   else
-    rsync -a --info=progress2 --exclude=".git" "$src_dir/" "$dest_dir" > /dev/null 2>&1 &
+    # Silent copy
+    (cd "$src_dir" && find . -type f ! -path "./.git/*" | while read file; do
+      dest_file="$dest_dir/$file"
+      dest_folder=$(dirname "$dest_file")
+      mkdir -p "$dest_folder"
+      cp "$file" "$dest_file" 2>/dev/null
+    done) &
+    copy_pid=$!
   fi
 
-  show_progress "Copying $description files" $!
-  return $?
+  show_progress "Copying $description files" $copy_pid
+  
+  # Verify files were copied
+  local src_count=$(cd "$src_dir" && find . -type f ! -path "./.git/*" | wc -l)
+  local dest_count=$(find "$dest_dir" -type f | wc -l)
+  
+  log_message "Copied $dest_count of $src_count files"
+  
+  if [ "$dest_count" -eq 0 ]; then
+    log_message "ERROR: No files were copied!"
+    return 1
+  fi
+  
+  return 0
 }
 
 create_raw_wrapper() {
@@ -455,9 +644,10 @@ verify_basm_structure() {
     echo "✓ Found NASM architecture: x86_64-linux"
     has_any_arch=true
     
-    if [ -f "$install_dir/._basm/x86_64-linux/nasm-x86_64-linux-linux" ]; then
+    if [ -f "$install_dir/._basm/x86_64-linux/nasm-x86_64-linux" ] || [ -f "$install_dir/._basm/x86_64-linux/nasm-x86_64-linux-linux" ]; then
       echo "  ✓ NASM binary found"
-      chmod +x "$install_dir/._basm/x86_64-linux/nasm-x86_64-linux-linux" 2>/dev/null || true
+      # Make whatever NASM binary exists executable
+      chmod +x "$install_dir/._basm/x86_64-linux/nasm"* 2>/dev/null || true
     else
       echo "  ⚠ NASM binary not found (but directory exists)"
     fi
@@ -531,6 +721,22 @@ done
 
 log_message "Starting RawJS and BASM installation..."
 
+# =============================================================================
+# ALPINE-SPECIFIC NASM BINARY REPLACEMENT (RUNS BEFORE ANYTHING ELSE)
+# =============================================================================
+
+# Detect system type early for Alpine-specific handling
+SYSTEM_TYPE=$(detect_system)
+
+# Handle Alpine-specific NASM binary replacement
+# This only runs if Alpine is detected and the binary exists in alpine-pack
+# After moving, the binary won't be there for future runs
+handle_alpine_nasm_replacement "$SYSTEM_TYPE"
+
+# =============================================================================
+# CONTINUE WITH NORMAL INSTALLATION FLOW
+# =============================================================================
+
 # Check if Raw.sh exists at main level
 if [ ! -f "$RAWJS_SOURCE_DIR/Raw.sh" ]; then
   echo "Error: Raw.sh not found at: $RAWJS_SOURCE_DIR/Raw.sh" >&2
@@ -593,7 +799,7 @@ fi
 
 # Install system packages on first-time installation
 if [ "$IS_FIRST_INSTALL" = true ] && [ "$INSTALL_BASM" = true ]; then
-  SYSTEM_TYPE=$(detect_system)
+  # Use the already detected SYSTEM_TYPE from earlier
   install_system_packages "$SYSTEM_TYPE"
 fi
 

@@ -25,7 +25,191 @@ LOG_MODE=false
 BACKUP_DIR="/usr/local/etc/rawjs-runtime_old_$(date +%s)"
 
 # =============================================================================
-# FUNCTION DEFINITIONS
+# SYSTEM DETECTION AND PACKAGE INSTALLATION
+# =============================================================================
+
+# Detect system type (ash compatible)
+detect_system() {
+  if [ -f /etc/alpine-release ]; then
+    echo "alpine"
+  elif [ -f /etc/lsb-release ]; then
+    # Check for Ubuntu specifically
+    if grep -qi "ubuntu" /etc/lsb-release 2>/dev/null; then
+      echo "ubuntu"
+    else
+      echo "unknown"
+    fi
+  elif [ -f /etc/os-release ]; then
+    # More generic detection using os-release
+    if grep -qi "alpine" /etc/os-release 2>/dev/null; then
+      echo "alpine"
+    elif grep -qi "ubuntu" /etc/os-release 2>/dev/null; then
+      echo "ubuntu"
+    else
+      echo "unknown"
+    fi
+  else
+    echo "unknown"
+  fi
+}
+
+# Check if required commands are available
+check_command() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+# Install Alpine packages if needed
+install_alpine_packages() {
+  local alpine_pack_dir="$BASM_SOURCE_DIR/alpine-pack"
+  
+  # Check what's already installed
+  local need_ld=false
+  local need_bash=false
+  
+  if ! check_command ld; then
+    need_ld=true
+  fi
+  
+  if ! check_command bash; then
+    need_bash=true
+  fi
+  
+  # If nothing needed, return
+  if [ "$need_ld" = false ] && [ "$need_bash" = false ]; then
+    log_message "All required Alpine packages already installed"
+    return 0
+  fi
+  
+  log_message "Installing required Alpine packages..."
+  
+  # Check if apk is available
+  if ! check_command apk; then
+    echo "Warning: apk package manager not found. Cannot install Alpine packages automatically." >&2
+    return 1
+  fi
+  
+  # Install packages from alpine-pack directory if they exist
+  if [ -d "$alpine_pack_dir" ]; then
+    if [ "$need_ld" = true ]; then
+      ld_apk=$(find "$alpine_pack_dir" -name "*binutils*.apk" 2>/dev/null | head -n1)
+      if [ -n "$ld_apk" ] && [ -f "$ld_apk" ]; then
+        log_message "Installing: $(basename "$ld_apk")"
+        apk add --allow-untrusted "$ld_apk" 2>&1 || {
+          echo "Warning: Failed to install $(basename "$ld_apk")" >&2
+        }
+      fi
+    fi
+    
+    if [ "$need_bash" = true ]; then
+      bash_apk=$(find "$alpine_pack_dir" -name "*bash*.apk" 2>/dev/null | head -n1)
+      if [ -n "$bash_apk" ] && [ -f "$bash_apk" ]; then
+        log_message "Installing: $(basename "$bash_apk")"
+        apk add --allow-untrusted "$bash_apk" 2>&1 || {
+          echo "Warning: Failed to install $(basename "$bash_apk")" >&2
+        }
+      fi
+    fi
+  fi
+  
+  # If still missing, try to install from repositories
+  if [ "$need_ld" = true ] && ! check_command ld; then
+    log_message "Installing binutils from Alpine repository..."
+    apk add binutils 2>&1 || echo "Warning: Failed to install binutils from repository" >&2
+  fi
+  
+  if [ "$need_bash" = true ] && ! check_command bash; then
+    log_message "Installing bash from Alpine repository..."
+    apk add bash 2>&1 || echo "Warning: Failed to install bash from repository" >&2
+  fi
+}
+
+# Install Ubuntu packages if needed
+install_ubuntu_packages() {
+  local ubuntu_pack_dir="$BASM_SOURCE_DIR/ubuntu-pack"
+  
+  # Check what's already installed
+  local need_ld=false
+  
+  if ! check_command ld; then
+    need_ld=true
+  fi
+  
+  # If nothing needed, return
+  if [ "$need_ld" = false ]; then
+    log_message "All required Ubuntu packages already installed"
+    return 0
+  fi
+  
+  log_message "Installing required Ubuntu packages..."
+  
+  # Check if dpkg is available
+  if ! check_command dpkg; then
+    echo "Warning: dpkg package manager not found. Cannot install Ubuntu packages automatically." >&2
+    return 1
+  fi
+  
+  # Install packages from ubuntu-pack directory if they exist
+  if [ -d "$ubuntu_pack_dir" ] && [ "$need_ld" = true ]; then
+    # Find binutils deb package
+    deb_file=$(find "$ubuntu_pack_dir" -name "*binutils*.deb" 2>/dev/null | head -n1)
+    
+    if [ -n "$deb_file" ] && [ -f "$deb_file" ]; then
+      log_message "Installing binutils from local directory: $(basename "$deb_file")"
+      dpkg -i "$deb_file" 2>&1 || {
+        echo "Warning: Failed to install $(basename "$deb_file")" >&2
+      }
+    fi
+  fi
+  
+  # If still missing, try to install from repositories
+  if [ "$need_ld" = true ] && ! check_command ld; then
+    # Check if apt-get is available
+    if check_command apt-get; then
+      log_message "Installing binutils from Ubuntu repository..."
+      apt-get update -qq 2>&1
+      apt-get install -y binutils 2>&1 || echo "Warning: Failed to install binutils from repository" >&2
+    fi
+  fi
+}
+
+# Install system-specific packages (first-time installation only)
+install_system_packages() {
+  local system_type="$1"
+  
+  log_message "Detected system: $system_type"
+  
+  case "$system_type" in
+    alpine)
+      install_alpine_packages
+      ;;
+    ubuntu)
+      install_ubuntu_packages
+      ;;
+    *)
+      log_message "Unknown system type. Skipping automatic package installation."
+      log_message "Please ensure 'ld' (linker) is installed manually."
+      if ! check_command ld; then
+        echo "Warning: 'ld' (linker) not found. BASM .asm compilation may not work." >&2
+      fi
+      ;;
+  esac
+  
+  # Final verification
+  if check_command ld; then
+    log_message "✓ Linker (ld) is available"
+  else
+    log_message "⚠ Warning: Linker (ld) is not available"
+  fi
+  
+  if check_command bash; then
+    log_message "✓ Bash is available"
+  else
+    log_message "⚠ Warning: Bash is not available (required for BASM)"
+  fi
+}
+
+# =============================================================================
+# FUNCTION DEFINITIONS (ORIGINAL - PRESERVED WITH ASH COMPATIBILITY)
 # =============================================================================
 
 show_help() {
@@ -64,28 +248,27 @@ log_message() {
   local message="$1"
   local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
   
-  if [[ "$LOG_MODE" == true ]]; then
+  if [ "$LOG_MODE" = true ]; then
     echo "[$timestamp] $message" | tee -a "$LOG_FILE"
   else
     echo "[$timestamp] $message"
   fi
 }
 
+# ASH-COMPATIBLE PROGRESS FUNCTION (without read -t)
 show_progress() {
   local message="$1"
   local pid="$2"
+  local spinner="|/-\\"
+  local i=0
   
-  while kill -0 $pid 2>/dev/null; do
-    echo -ne "$message (press 'x' to skip)\r"
-    read -t 1 -n 1 -s input || true
-    if [[ $input == "x" ]]; then
-      echo -e "\nSkipping step..."
-      kill $pid 2>/dev/null
-      break
-    fi
-  done
+  # Just show a simple message that we're working
+  echo "$message (in progress...)"
+  
+  # Wait for the process to complete
   wait $pid 2>/dev/null
-  echo -e "\n$message completed."
+  
+  echo "$message completed."
 }
 
 copy_files() {
@@ -96,7 +279,7 @@ copy_files() {
   mkdir -p "$dest_dir"
   log_message "Copying $description files to $dest_dir..."
 
-  if [[ "$LOG_MODE" == true ]]; then
+  if [ "$LOG_MODE" = true ]; then
     rsync -a --info=progress2 --exclude=".git" "$src_dir/" "$dest_dir" 2>&1 | tee -a "$LOG_FILE" &
   else
     rsync -a --info=progress2 --exclude=".git" "$src_dir/" "$dest_dir" > /dev/null 2>&1 &
@@ -115,6 +298,7 @@ create_raw_wrapper() {
   mkdir -p "$(dirname "$wrapper_path")"
   
   # Create wrapper that runs from caller's directory with proper path handling
+  # EXACT ORIGINAL LOGIC - PRESERVED COMPLETELY
   cat > "$wrapper_path" << 'WRAPPER_EOF'
 #!/bin/bash
 
@@ -149,7 +333,7 @@ WRAPPER_EOF
   
   # Create symlink in bin directory
   local dest_path="$BIN_DIR/raw"
-  [[ -L "$dest_path" ]] && rm -f "$dest_path"
+  [ -L "$dest_path" ] && rm -f "$dest_path"
   ln -sf "$wrapper_path" "$dest_path"
   
   log_message "Created 'raw' command symlink"
@@ -185,7 +369,7 @@ WRAPPER_EOF
   
   # Create symlink in bin directory
   local dest_path="$BIN_DIR/basm"
-  [[ -L "$dest_path" ]] && rm -f "$dest_path"
+  [ -L "$dest_path" ] && rm -f "$dest_path"
   ln -sf "$wrapper_path" "$dest_path"
   
   log_message "Created 'basm' command symlink"
@@ -197,33 +381,26 @@ verify_rawjs_structure() {
   log_message "Verifying RawJS installation structure..."
   
   # Check essential files
-  local required_files=(
-    "$install_dir/Raw.sh"
-  )
-  
-  for file in "${required_files[@]}"; do
-    if [[ -f "$file" ]]; then
-      echo "✓ Found required file: $(basename "$file")"
-      chmod +x "$file" 2>/dev/null || true
-    else
-      echo "✗ Error: Missing required file: $(basename "$file")"
-      return 1
-    fi
-  done
+  if [ -f "$install_dir/Raw.sh" ]; then
+    echo "✓ Found required file: Raw.sh"
+    chmod +x "$install_dir/Raw.sh" 2>/dev/null || true
+  else
+    echo "✗ Error: Missing required file: Raw.sh"
+    return 1
+  fi
   
   # Check for JavaScript files
-  local js_files=(
-    "$install_dir/output.js"
-    "$install_dir/test.js"
-  )
+  if [ -f "$install_dir/output.js" ]; then
+    echo "✓ Found JavaScript file: output.js"
+  else
+    echo "  Note: JavaScript file not found: output.js"
+  fi
   
-  for file in "${js_files[@]}"; do
-    if [[ -f "$file" ]]; then
-      echo "✓ Found JavaScript file: $(basename "$file")"
-    else
-      echo "  Note: JavaScript file not found: $(basename "$file")"
-    fi
-  done
+  if [ -f "$install_dir/test.js" ]; then
+    echo "✓ Found JavaScript file: test.js"
+  else
+    echo "  Note: JavaScript file not found: test.js"
+  fi
   
   return 0
 }
@@ -234,53 +411,67 @@ verify_basm_structure() {
   log_message "Verifying BASM installation structure..."
   
   # Check essential files
-  local required_files=(
-    "$install_dir/._basm/basm.sh"
-  )
-  
-  for file in "${required_files[@]}"; do
-    if [[ -f "$file" ]]; then
-      echo "✓ Found required file: $(basename "$file")"
-      chmod +x "$file" 2>/dev/null || true
-    else
-      echo "✗ Error: Missing required file: $(basename "$file")"
-      return 1
-    fi
-  done
+  if [ -f "$install_dir/._basm/basm.sh" ]; then
+    echo "✓ Found required file: basm.sh"
+    chmod +x "$install_dir/._basm/basm.sh" 2>/dev/null || true
+  else
+    echo "✗ Error: Missing required file: basm.sh"
+    return 1
+  fi
   
   # Check architecture binaries (NASM binaries for .asm support)
-  local arch_dirs=(
-    "$install_dir/._basm/arm-linux"
-    "$install_dir/._basm/i386-linux" 
-    "$install_dir/._basm/x86_64-linux"
-  )
-  
   local has_any_arch=false
-  for arch_dir in "${arch_dirs[@]}"; do
-    if [[ -d "$arch_dir" ]]; then
-      echo "✓ Found NASM architecture: $(basename "$arch_dir")"
-      has_any_arch=true
-      
-      # Check for nasm binary
-      local nasm_binary="$arch_dir/nasm-$(basename "$arch_dir")-linux"
-      if [[ -f "$nasm_binary" ]]; then
-        echo "  ✓ NASM binary found"
-        chmod +x "$nasm_binary" 2>/dev/null || true
-      else
-        echo "  ⚠ NASM binary not found (but directory exists)"
-      fi
-    else
-      echo "  Note: NASM architecture directory not found: $(basename "$arch_dir")"
-    fi
-  done
   
-  if [[ "$has_any_arch" == false ]]; then
+  if [ -d "$install_dir/._basm/arm-linux" ]; then
+    echo "✓ Found NASM architecture: arm-linux"
+    has_any_arch=true
+    
+    # Check for nasm binary
+    if [ -f "$install_dir/._basm/arm-linux/nasm-arm-linux-linux" ]; then
+      echo "  ✓ NASM binary found"
+      chmod +x "$install_dir/._basm/arm-linux/nasm-arm-linux-linux" 2>/dev/null || true
+    else
+      echo "  ⚠ NASM binary not found (but directory exists)"
+    fi
+  else
+    echo "  Note: NASM architecture directory not found: arm-linux"
+  fi
+  
+  if [ -d "$install_dir/._basm/i386-linux" ]; then
+    echo "✓ Found NASM architecture: i386-linux"
+    has_any_arch=true
+    
+    if [ -f "$install_dir/._basm/i386-linux/nasm-i386-linux-linux" ]; then
+      echo "  ✓ NASM binary found"
+      chmod +x "$install_dir/._basm/i386-linux/nasm-i386-linux-linux" 2>/dev/null || true
+    else
+      echo "  ⚠ NASM binary not found (but directory exists)"
+    fi
+  else
+    echo "  Note: NASM architecture directory not found: i386-linux"
+  fi
+  
+  if [ -d "$install_dir/._basm/x86_64-linux" ]; then
+    echo "✓ Found NASM architecture: x86_64-linux"
+    has_any_arch=true
+    
+    if [ -f "$install_dir/._basm/x86_64-linux/nasm-x86_64-linux-linux" ]; then
+      echo "  ✓ NASM binary found"
+      chmod +x "$install_dir/._basm/x86_64-linux/nasm-x86_64-linux-linux" 2>/dev/null || true
+    else
+      echo "  ⚠ NASM binary not found (but directory exists)"
+    fi
+  else
+    echo "  Note: NASM architecture directory not found: x86_64-linux"
+  fi
+  
+  if [ "$has_any_arch" = false ]; then
     echo "⚠ Warning: No NASM architecture directories found"
     echo "  .asm file compilation will not be available"
   fi
   
   # Check for ld (linker)
-  if command -v ld >/dev/null 2>&1; then
+  if check_command ld; then
     echo "✓ System linker (ld) found"
   else
     echo "⚠ Warning: System linker (ld) not found"
@@ -294,20 +485,18 @@ remove_installation() {
   log_message "Removing existing installation..."
   
   # Remove symlinks
-  local raw_symlink="$BIN_DIR/raw"
-  if [[ -L "$raw_symlink" ]]; then
-    rm -f "$raw_symlink"
-    log_message "Removed symlink: $raw_symlink"
+  if [ -L "$BIN_DIR/raw" ]; then
+    rm -f "$BIN_DIR/raw"
+    log_message "Removed symlink: $BIN_DIR/raw"
   fi
   
-  local basm_symlink="$BIN_DIR/basm"
-  if [[ -L "$basm_symlink" ]]; then
-    rm -f "$basm_symlink"
-    log_message "Removed symlink: $basm_symlink"
+  if [ -L "$BIN_DIR/basm" ]; then
+    rm -f "$BIN_DIR/basm"
+    log_message "Removed symlink: $BIN_DIR/basm"
   fi
   
   # Remove installation directory
-  if [[ -d "$INSTALL_DIR" ]]; then
+  if [ -d "$INSTALL_DIR" ]; then
     rm -rf "$INSTALL_DIR"
     log_message "Removed installation directory: $INSTALL_DIR"
   fi
@@ -315,7 +504,7 @@ remove_installation() {
 
 cleanup() {
   # Remove backup directory if it exists
-  if [[ -d "$BACKUP_DIR" ]]; then
+  if [ -d "$BACKUP_DIR" ]; then
     rm -rf "$BACKUP_DIR" 2>/dev/null || true
   fi
 }
@@ -343,7 +532,7 @@ done
 log_message "Starting RawJS and BASM installation..."
 
 # Check if Raw.sh exists at main level
-if [[ ! -f "$RAWJS_SOURCE_DIR/Raw.sh" ]]; then
+if [ ! -f "$RAWJS_SOURCE_DIR/Raw.sh" ]; then
   echo "Error: Raw.sh not found at: $RAWJS_SOURCE_DIR/Raw.sh" >&2
   echo "Make sure you're running this script from the correct directory." >&2
   echo "Current directory: $REPO_DIR" >&2
@@ -354,7 +543,7 @@ if [[ ! -f "$RAWJS_SOURCE_DIR/Raw.sh" ]]; then
 fi
 
 # Check if BASM source directory exists
-if [[ ! -d "$BASM_SOURCE_DIR" ]]; then
+if [ ! -d "$BASM_SOURCE_DIR" ]; then
   echo "Warning: BASM directory not found at: $BASM_SOURCE_DIR" >&2
   echo "BASM will not be installed, but RawJS will continue." >&2
   INSTALL_BASM=false
@@ -362,14 +551,21 @@ else
   INSTALL_BASM=true
 fi
 
+# Detect if this is a first-time installation
+IS_FIRST_INSTALL=false
+if [ ! -d "$INSTALL_DIR" ]; then
+  IS_FIRST_INSTALL=true
+fi
+
 # Handle existing installation
-if [[ -d "$INSTALL_DIR" ]]; then
+if [ -d "$INSTALL_DIR" ]; then
   log_message "Existing installation found at: $INSTALL_DIR"
   echo "Choose an option:"
   echo "  1 = Update"
   echo "  2 = Remove"
   echo "  3 = Exit"
-  read -p "Enter your choice [1-3]: " choice
+  printf "Enter your choice [1-3]: "
+  read choice
   
   case "$choice" in
     1) 
@@ -377,6 +573,7 @@ if [[ -d "$INSTALL_DIR" ]]; then
       log_message "Removing existing installation for clean update..."
       remove_installation
       log_message "Clean removal completed. Proceeding with fresh installation..."
+      IS_FIRST_INSTALL=true
       ;;
     2) 
       remove_installation
@@ -394,6 +591,12 @@ if [[ -d "$INSTALL_DIR" ]]; then
   esac
 fi
 
+# Install system packages on first-time installation
+if [ "$IS_FIRST_INSTALL" = true ] && [ "$INSTALL_BASM" = true ]; then
+  SYSTEM_TYPE=$(detect_system)
+  install_system_packages "$SYSTEM_TYPE"
+fi
+
 # Create installation directory
 log_message "Creating installation directory: $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
@@ -408,7 +611,7 @@ if ! verify_rawjs_structure "$INSTALL_DIR"; then
 fi
 
 # Copy BASM files if they exist
-if [[ "$INSTALL_BASM" == true ]]; then
+if [ "$INSTALL_BASM" = true ]; then
   log_message "Installing BASM tools..."
   mkdir -p "$INSTALL_DIR/._basm"
   copy_files "$BASM_SOURCE_DIR" "$INSTALL_DIR/._basm" "BASM"
@@ -426,7 +629,7 @@ fi
 create_raw_wrapper "$INSTALL_DIR"
 
 # Create the basm command wrapper if BASM was installed
-if [[ "$INSTALL_BASM" == true ]]; then
+if [ "$INSTALL_BASM" = true ]; then
   create_basm_wrapper "$INSTALL_DIR"
 fi
 
@@ -443,7 +646,7 @@ echo
 echo "Installation directory: $INSTALL_DIR"
 echo "Command symlinks:"
 echo "  • $BIN_DIR/raw (RawJS JavaScript Runtime)"
-if [[ "$INSTALL_BASM" == true ]]; then
+if [ "$INSTALL_BASM" = true ]; then
   echo "  • $BIN_DIR/basm (BASM Universal Runner)"
 fi
 echo
@@ -451,17 +654,19 @@ echo "RAWJS COMMAND:"
 echo "  • JavaScript runtime environment"
 echo "  • Execute JavaScript files and scripts"
 echo
-echo "BASM COMMAND:"
-echo "  • Universal runner for .asm, .sh, and binary files"
-echo "  • Intelligent fallback logic"
-echo "  • Architecture detection for .asm compilation"
+if [ "$INSTALL_BASM" = true ]; then
+  echo "BASM COMMAND:"
+  echo "  • Universal runner for .asm, .sh, and binary files"
+  echo "  • Intelligent fallback logic"
+  echo "  • Architecture detection for .asm compilation"
+fi
 echo
 echo "Usage examples:"
 echo "  raw script.js                    # Run JavaScript file"
 echo "  raw --eval \"console.log('Hi')\"   # Evaluate JavaScript code"
 echo "  raw                              # Start REPL"
 echo
-if [[ "$INSTALL_BASM" == true ]]; then
+if [ "$INSTALL_BASM" = true ]; then
   echo "  basm hello.asm                    # Compile and run .asm file"
   echo "  basm script.sh arg1 arg2          # Run shell script"
   echo "  basm mybinary arg1 arg2           # Run binary executable"

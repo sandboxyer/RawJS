@@ -842,6 +842,32 @@ fi
 # Cleanup backup if it exists
 cleanup
 
+# =============================================================================
+# FINAL STEP: INITIALIZE RAWJS ENVIRONMENT
+# =============================================================================
+
+log_message "Initializing RawJS environment..."
+echo
+echo "Running 'raw --reset' to build initial directory structure..."
+
+# Execute raw --reset to initialize the environment
+if [ -f "$BIN_DIR/raw" ] && [ -x "$BIN_DIR/raw" ]; then
+    if raw --reset; then
+        log_message "✓ RawJS environment initialized successfully"
+        echo "✓ RawJS environment initialized successfully"
+    else
+        log_message "⚠ Warning: RawJS environment initialization had issues"
+        echo "⚠ Warning: RawJS environment initialization had issues"
+        echo "You can manually run: raw --reset"
+    fi
+else
+    log_message "⚠ Warning: raw command not found or not executable"
+    echo "⚠ Warning: Cannot run raw --reset - command not available"
+    echo "You may need to run manually: raw --reset"
+fi
+
+echo
+
 log_message "RawJS and BASM installation completed!"
 
 echo

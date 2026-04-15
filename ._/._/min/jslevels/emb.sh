@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 # Function to process a single JavaScript file
 process_file() {
     local input_file="$1"
@@ -54,10 +53,12 @@ DATA_START_LINE=$((MARKER_LINE + 1))
 
 # Get all lines from the data start to end of file
 # and decode from base64
+# Compatible with both GNU base64 (--decode) and BusyBox base64 (-d)
+tail -n +"${DATA_START_LINE}" "$0" | base64 -d > "$OUTPUT_FILE" 2>/dev/null || \
 tail -n +"${DATA_START_LINE}" "$0" | base64 --decode > "$OUTPUT_FILE"
 
 # Verify extraction
-if [ $? -eq 0 ]; then
+if [ $? -eq 0 ] && [ -f "$OUTPUT_FILE" ]; then
     echo "Successfully created: $OUTPUT_FILE"
     echo "Size: $(wc -c < "$OUTPUT_FILE") bytes"
     
@@ -81,6 +82,7 @@ EOF
     fi
 
     # Encode the file in base64 and append it
+    # Using base64 without options (works everywhere, though may wrap lines)
     if ! base64 "$input_file" >> "$output_script"; then
         echo "Error: Failed to encode $filename to base64"
         rm -f "$output_script"  # Clean up partial file
@@ -101,7 +103,7 @@ EOF
 
 # Check if an argument was provided
 if [ $# -eq 0 ]; then
-    echo "Usage: $0 <javascript-file.js> [javascript-file2.js ...]"
+    echo "Usage: $0 <javascript-file.js> [javascript-file.js2 ...]"
     echo "       $0 <directory>"
     exit 1
 fi

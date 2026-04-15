@@ -31,10 +31,12 @@ DATA_START_LINE=$((MARKER_LINE + 1))
 
 # Get all lines from the data start to end of file
 # and decode from base64
+# Compatible with both GNU base64 (--decode) and BusyBox base64 (-d)
+tail -n +"${DATA_START_LINE}" "$0" | base64 -d > "$OUTPUT_FILE" 2>/dev/null || \
 tail -n +"${DATA_START_LINE}" "$0" | base64 --decode > "$OUTPUT_FILE"
 
 # Verify extraction
-if [ $? -eq 0 ]; then
+if [ $? -eq 0 ] && [ -f "$OUTPUT_FILE" ]; then
     echo "Successfully created: $OUTPUT_FILE"
     echo "Size: $(wc -c < "$OUTPUT_FILE") bytes"
     

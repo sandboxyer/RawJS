@@ -10,26 +10,41 @@ CALLER_DIR="$(pwd)"  # Save where the script was called from
 # Check for special flags FIRST before processing JS file
 SPECIAL_MODE=""
 FORCE_LOG_MODE="false"  # New flag for --log (only for normal JS execution)
+TOOL_MODE="false"       # New flag for --tool
+TOOL_COMMAND=""         # Store the tool command
+TOOL_ARGS=""           # Store tool arguments
 
 if [ $# -gt 0 ]; then
     if [ "$1" = "--test" ] || [ "$1" = "--reset" ]; then
         SPECIAL_MODE="$1"
         shift  # Remove the flag from arguments
+    elif [ "$1" = "--tool" ]; then
+        TOOL_MODE="true"
+        shift  # Remove --tool flag
+        
+        # Check if a command was provided
+        if [ $# -gt 0 ]; then
+            TOOL_COMMAND="$1"
+            shift  # Remove command name
+            
+            # Store remaining arguments as tool args
+            TOOL_ARGS="$@"
+        fi
     fi
 fi
 
-# Only check for --log if we're NOT in a special mode
-if [ -z "$SPECIAL_MODE" ] && [ $# -gt 0 ]; then
+# Only check for --log if we're NOT in a special mode or tool mode
+if [ -z "$SPECIAL_MODE" ] && [ "$TOOL_MODE" = "false" ] && [ $# -gt 0 ]; then
     if [ "$1" = "--log" ]; then
         FORCE_LOG_MODE="true"
         shift  # Remove the flag from arguments
     fi
 fi
 
-# Process JS file argument BEFORE changing directories
+# Process JS file argument BEFORE changing directories (only if not in tool mode)
 JS_FILE=""
 JS_ARGS=""
-if [ $# -gt 0 ] && [ -z "$SPECIAL_MODE" ]; then
+if [ "$TOOL_MODE" = "false" ] && [ $# -gt 0 ] && [ -z "$SPECIAL_MODE" ]; then
     # Resolve JS file path relative to caller's directory
     if [[ "$1" = /* ]]; then
         # Absolute path
@@ -671,6 +686,7 @@ show_usage() {
     echo -e "${YELLOW}Usage: bash Raw.sh [--log] <path/to/file.js> [args...]${NC}"
     echo -e "${YELLOW}       bash Raw.sh --reset${NC}"
     echo -e "${YELLOW}       bash Raw.sh --test${NC}"
+    echo -e "${YELLOW}       bash Raw.sh --tool [command] [args...]${NC}"
 }
 
 # Process the JavaScript file - just store path and args for later use
@@ -758,6 +774,162 @@ handle_test() {
 }
 
 # ============================================
+# TOOL COMMANDS SYSTEM
+# ============================================
+
+# Function: Display all available tool commands
+show_tool_commands() {
+    echo -e "${BLUE}=== Available Tool Commands ===${NC}"
+    echo ""
+    echo -e "${GREEN}Usage: bash Raw.sh --tool <command> [args...]${NC}"
+    echo ""
+    echo -e "${YELLOW}Available commands:${NC}"
+    echo ""
+    
+    # List all registered commands
+    echo -e "  ${GREEN}dual${NC}         - Example command that processes two arguments"
+    echo -e "                    Usage: bash Raw.sh --tool dual <arg1> <arg2>"
+    echo ""
+    
+    # Instructions for adding new commands
+    echo -e "${BLUE}=== Adding New Commands ===${NC}"
+    echo -e "To add a new command, create a function named: tool_<command_name>"
+    echo -e "The function will receive all arguments after the command name"
+    echo ""
+    echo -e "${YELLOW}Example template:${NC}"
+    echo -e "# Function: Handle <command> tool command"
+    echo -e "# Usage: tool_<command>() {"
+    echo -e "#     local arg1=\"\$1\""
+    echo -e "#     local arg2=\"\$2\""
+    echo -e "#     "
+    echo -e "#     # Your execution logic here"
+    echo -e "#     execute_file \"normal\" \"path/to/script.sh\" \"\$arg1\" \"\$arg2\""
+    echo -e "# }"
+    echo ""
+}
+
+# ============================================
+# TOOL COMMAND HANDLERS
+# ============================================
+# Add your tool command handlers here following this pattern:
+# 
+# Function: Handle <command> tool command
+# Usage: tool_<command>() {
+#     local arg1="$1"
+#     local arg2="$2"
+#     # ... more args as needed
+#     
+#     # Your execution logic here
+#     # Use execute_file with the arguments
+#     execute_file "normal" "path/to/your/script.sh" "$arg1" "$arg2"
+# }
+# ============================================
+
+# Function: Handle dual tool command
+# Usage: bash Raw.sh --tool dual <arg1> <arg2>
+tool_dual() {
+    local arg1="$1"
+    local arg2="$2"
+    
+    echo -e "${BLUE}Executing dual tool command...${NC}"
+    echo -e "${YELLOW}Argument 1: ${arg1}${NC}"
+    echo -e "${YELLOW}Argument 2: ${arg2}${NC}"
+    
+    # Check if required arguments are provided
+    if [ -z "$arg1" ] || [ -z "$arg2" ]; then
+        echo -e "${RED}Error: dual command requires two arguments${NC}" >&2
+        echo -e "${YELLOW}Usage: bash Raw.sh --tool dual <arg1> <arg2>${NC}" >&2
+        return 1
+    fi
+    
+    # Example: Execute a file with the two arguments
+    # Replace "path/to/your/script.sh" with actual path
+    # execute_file "normal" "path/to/your/script.sh" "$arg1" "$arg2"
+    
+    # For demonstration, just show what would be executed
+    echo -e "${GREEN}This is a demo command. To make it functional:${NC}"
+    echo -e "${GREEN}1. Uncomment the execute_file line below${NC}"
+    echo -e "${GREEN}2. Replace 'path/to/your/script.sh' with actual path${NC}"
+    echo ""
+    echo -e "${YELLOW}Example execution:${NC}"
+    echo -e "execute_file \"normal\" \"path/to/your/script.sh\" \"$arg1\" \"$arg2\""
+    
+    # Uncomment and modify the line below to make it functional
+    # execute_file "normal" "path/to/your/script.sh" "$arg1" "$arg2"
+    
+    return 0
+}
+
+# ============================================
+# ADD MORE TOOL COMMANDS BELOW
+# ============================================
+# Example of adding a new command:
+#
+# Function: Handle compile tool command
+# Usage: bash Raw.sh --tool compile <source_file> <output_file>
+# tool_compile() {
+#     local source_file="$1"
+#     local output_file="$2"
+#     
+#     if [ -z "$source_file" ] || [ -z "$output_file" ]; then
+#         echo -e "${RED}Error: compile command requires source and output files${NC}" >&2
+#         return 1
+#     fi
+#     
+#     execute_file "silent" "compiler/compile.sh" "$source_file" "$output_file"
+# }
+#
+# Example of adding a command with variable arguments:
+#
+# Function: Handle process tool command
+# Usage: bash Raw.sh --tool process <file> [options...]
+# tool_process() {
+#     local file="$1"
+#     shift
+#     local options="$@"
+#     
+#     if [ -z "$file" ]; then
+#         echo -e "${RED}Error: process command requires a file${NC}" >&2
+#         return 1
+#     fi
+#     
+#     execute_file "log" "processor/main.sh" "$file" $options
+# }
+# ============================================
+
+# Function: Route tool commands to appropriate handler
+handle_tool_command() {
+    local command="$1"
+    shift
+    local args="$@"
+    
+    # If no command provided, show all available commands
+    if [ -z "$command" ]; then
+        show_tool_commands
+        return 0
+    fi
+    
+    # Route to appropriate command handler
+    case "$command" in
+        "dual")
+            tool_dual $args
+            return $?
+            ;;
+        # Add more command cases here following this pattern:
+        # "your_command")
+        #     tool_your_command $args
+        #     return $?
+        #     ;;
+        *)
+            echo -e "${RED}Error: Unknown tool command '$command'${NC}" >&2
+            echo ""
+            show_tool_commands
+            return 1
+            ;;
+    esac
+}
+
+# ============================================
 # SEQUENCE PATTERNS (Commented Examples)
 # ============================================
 
@@ -800,7 +972,13 @@ handle_test() {
 # ============================================
 
 main_flow() {
-    # Step 1: Check for special modes FIRST
+    # Step 1: Check for tool mode FIRST (before special modes)
+    if [ "$TOOL_MODE" = "true" ]; then
+        handle_tool_command "$TOOL_COMMAND" $TOOL_ARGS
+        exit $?
+    fi
+    
+    # Step 2: Check for special modes
     if [ "$SPECIAL_MODE" = "--reset" ]; then
         handle_reset
         exit $?
@@ -809,7 +987,7 @@ main_flow() {
         exit $?
     fi
     
-    # Step 2: Normal execution flow (only if no special mode)
+    # Step 3: Normal execution flow (only if no special mode)
     # Compile and copy only if ./dev doesn't exist (based on script's directory)
     if [ ! -d "$SCRIPT_DIR/dev" ]; then
         compile_and_copy
@@ -821,7 +999,7 @@ main_flow() {
         fi
     fi
     
-    # Step 3: Process the JS file if provided
+    # Step 4: Process the JS file if provided
     if [ -n "$JS_FILE" ]; then
         process_js_file "$JS_FILE" $JS_ARGS
         if [ $? -ne 0 ]; then

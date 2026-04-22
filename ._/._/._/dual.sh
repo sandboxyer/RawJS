@@ -13,8 +13,23 @@ if [ $# -ne 1 ]; then
     exit 1
 fi
 
+# Get the directory where THIS script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Resolve paths relative to script location
 JS_FILE="$1"
-RAW_SCRIPT="../../../Raw.sh"
+# If JS_FILE is relative, make it absolute from current working directory
+if [[ ! "$JS_FILE" = /* ]]; then
+    JS_FILE="$(pwd)/$JS_FILE"
+fi
+
+# Raw.sh is always relative to this script's location
+RAW_SCRIPT="$SCRIPT_DIR/../../../Raw.sh"
+# Make Raw.sh absolute if it's relative
+if [[ ! "$RAW_SCRIPT" = /* ]]; then
+    RAW_SCRIPT="$(cd "$(dirname "$RAW_SCRIPT")" && pwd)/$(basename "$RAW_SCRIPT")"
+fi
+
 FILENAME=$(basename "$JS_FILE")
 
 # Function to strip ANSI color codes
@@ -27,7 +42,7 @@ normalize() {
     strip_colors | sed 's/\r$//' | sed 's/[[:space:]]*$//' | grep -v '^$'
 }
 
-# Run tests silently
+# Run tests silently - using absolute paths
 NODE_OUTPUT=$(node "$JS_FILE" 2>&1 | normalize)
 RAW_OUTPUT=$(bash "$RAW_SCRIPT" "$JS_FILE" 2>&1 | normalize)
 

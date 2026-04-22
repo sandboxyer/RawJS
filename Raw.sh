@@ -815,36 +815,45 @@ show_tool_commands() {
 # 
 # Function: Handle <command> tool command
 # Usage: tool_<command>() {
-#     local arg1="$1"
-#     local arg2="$2"
-#     # ... more args as needed
+#     # All arguments are passed as $@
+#     # You can access individual args: $1, $2, $3, etc.
+#     # Or pass all args: "$@"
 #     
 #     # Your execution logic here
-#     # Use execute_file with the arguments
-#     execute_file "normal" "path/to/your/script.sh" "$arg1" "$arg2"
+#     # Use execute_file with all arguments
+#     execute_file "normal" "path/to/your/script.sh" "$@"
 # }
 # ============================================
 
 # Function: Handle dual tool command
-# Usage: bash Raw.sh --tool dual <arg1> <arg2>
+# Usage: bash Raw.sh --tool dual <arg1> <arg2> [arg3] [arg4...]
+# This command can accept any number of arguments and passes them all
 tool_dual() {
-    local arg1="$1"
-    local arg2="$2"
-    
     echo -e "${BLUE}Executing dual tool command...${NC}"
-    echo -e "${YELLOW}Argument 1: ${arg1}${NC}"
-    echo -e "${YELLOW}Argument 2: ${arg2}${NC}"
     
-    # Check if required arguments are provided
-    if [ -z "$arg1" ] || [ -z "$arg2" ]; then
-        echo -e "${RED}Error: dual command requires two arguments${NC}" >&2
-        echo -e "${YELLOW}Usage: bash Raw.sh --tool dual <arg1> <arg2>${NC}" >&2
+    # Count and display all arguments
+    local arg_count=$#
+    echo -e "${YELLOW}Received ${arg_count} argument(s)${NC}"
+    
+    # Display each argument
+    local i=1
+    for arg in "$@"; do
+        echo -e "${YELLOW}Argument ${i}: ${arg}${NC}"
+        ((i++))
+    done
+    
+    # Check if at least one argument is provided
+    if [ $# -eq 0 ]; then
+        echo -e "${RED}Error: dual command requires at least one argument${NC}" >&2
+        echo -e "${YELLOW}Usage: bash Raw.sh --tool dual <arg1> [arg2] [arg3...]${NC}" >&2
         return 1
     fi
     
-    # Example: Execute a file with the two arguments
+    echo ""
+    
+    # Example: Execute a file with all arguments passed through
     # Replace "path/to/your/script.sh" with actual path
-    # execute_file "normal" "path/to/your/script.sh" "$arg1" "$arg2"
+    # The "$@" passes ALL arguments to the execute_file function
     
     # For demonstration, just show what would be executed
     echo -e "${GREEN}This is a demo command. To make it functional:${NC}"
@@ -852,10 +861,11 @@ tool_dual() {
     echo -e "${GREEN}2. Replace 'path/to/your/script.sh' with actual path${NC}"
     echo ""
     echo -e "${YELLOW}Example execution:${NC}"
-    echo -e "execute_file \"normal\" \"path/to/your/script.sh\" \"$arg1\" \"$arg2\""
+    echo -e "execute_file \"normal\" \"path/to/your/script.sh\" $@"
     
     # Uncomment and modify the line below to make it functional
-    # execute_file "normal" "path/to/your/script.sh" "$arg1" "$arg2"
+    # The "$@" will pass all arguments exactly as received
+     execute_file "log" "../._/._/._/dual.sh" "$@"
     
     return 0
 }

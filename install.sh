@@ -487,7 +487,6 @@ create_raw_wrapper() {
   mkdir -p "$(dirname "$wrapper_path")"
   
   # Create wrapper that runs from caller's directory with proper path handling
-  # EXACT ORIGINAL LOGIC - PRESERVED COMPLETELY
   cat > "$wrapper_path" << 'WRAPPER_EOF'
 #!/bin/bash
 
@@ -496,16 +495,43 @@ CALLER_DIR="$(pwd)"
 INSTALL_DIR="/usr/local/etc/rawjs-runtime"
 
 # Process arguments to convert relative paths to absolute paths
+# BUT preserve special flags (--tool, --test, --reset, --log) and their arguments
 args=()
+skip_next=false
+
 for arg in "$@"; do
-  # Check if argument is a file that exists (or might exist) in the caller's directory
-  if [[ -f "$CALLER_DIR/$arg" ]] || [[ "$arg" != -* && ! "$arg" =~ ^/ ]]; then
-    # Convert to absolute path if it's not a flag and not already absolute
-    args+=("$CALLER_DIR/$arg")
-  else
-    # Pass through flags and absolute paths unchanged
+  if [ "$skip_next" = true ]; then
+    # This argument is part of a special flag's value, pass through unchanged
     args+=("$arg")
+    skip_next=false
+    continue
   fi
+  
+  # Check if this is a special flag that shouldn't have its arguments path-converted
+  case "$arg" in
+    --tool|--test|--reset|--log)
+      # Special flag - pass through unchanged
+      args+=("$arg")
+      # For --tool, the next argument is the command name - don't convert it
+      if [ "$arg" = "--tool" ]; then
+        skip_next=true
+      fi
+      ;;
+    -*)
+      # Other flags - pass through unchanged
+      args+=("$arg")
+      ;;
+    *)
+      # Not a flag - check if it's a file that exists in caller's directory
+      if [ -f "$CALLER_DIR/$arg" ]; then
+        # Convert to absolute path
+        args+=("$CALLER_DIR/$arg")
+      else
+        # Pass through unchanged
+        args+=("$arg")
+      fi
+      ;;
+  esac
 done
 
 # Navigate to the caller's directory to maintain context

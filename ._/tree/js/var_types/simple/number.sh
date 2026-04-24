@@ -39,12 +39,9 @@ echo "DEBUG: VAR_NAME='$VAR_NAME', VAR_VALUE='$VAR_VALUE'" >&2
 # ----------------------------------------------------------------------
 has_operators() {
     local expr="$1"
-    echo "DEBUG: has_operators checking '$expr'" >&2
     if [[ "$expr" =~ [+*/().%-] ]]; then
-        echo "DEBUG: has_operators TRUE" >&2
         return 0
     else
-        echo "DEBUG: has_operators FALSE" >&2
         return 1
     fi
 }
@@ -194,6 +191,25 @@ to_rpn() {
 }
 
 # ----------------------------------------------------------------------
+# Generate float constant declarations (assumed to be defined elsewhere)
+# ----------------------------------------------------------------------
+generate_float_constants() {
+    # This function should generate the constant labels for float literals.
+    # Placeholder: your actual implementation goes here.
+    local tokens=("$@")
+    local idx=0
+    local result=""
+    for token in "${tokens[@]}"; do
+        if [[ "$token" == FLOAT:* ]]; then
+            local val="${token#*:}"
+            result="${result}    ${VAR_NAME}_float${idx} dd ${val}"$'\n'
+            idx=$((idx+1))
+        fi
+    done
+    echo "$result"
+}
+
+# ----------------------------------------------------------------------
 # Generate assembly code from RPN tokens
 # ----------------------------------------------------------------------
 generate_asm_code() {
@@ -274,10 +290,11 @@ generate_asm_code() {
         code="${code}    movsd xmm0, [rsp]"$'\n'
         code="${code}    add rsp, 8"$'\n'
         code="${code}    movsd [${VAR_NAME}_float_val], xmm0"$'\n'
-        code="${code}    ; Convert float to string"$'\n'
+        code="${code}    ; Convert float to string (separate buffer per variable)"$'\n'
+        code="${code}    mov rdi, ${VAR_NAME}_str    ; output buffer"$'\n'
         code="${code}    movsd xmm0, [${VAR_NAME}_float_val]"$'\n'
         code="${code}    call float_to_str"$'\n'
-        code="${code}    mov qword [${VAR_NAME}], float_buffer"$'\n'
+        code="${code}    mov qword [${VAR_NAME}], ${VAR_NAME}_str"$'\n'
     else
         code="${code}    pop rax"$'\n'
         code="${code}    mov [${VAR_NAME}], rax"$'\n'
@@ -293,31 +310,23 @@ DATA_SECTION=""
 CODE_SECTION=""
 IS_FLOAT=false
 
-echo "DEBUG: Checking VAR_VALUE='$VAR_VALUE'" >&2
-
 # CHECK FOR OPERATORS FIRST
 if has_operators "$VAR_VALUE"; then
-    echo "DEBUG: Expression detected, evaluating at runtime" >&2
-    
     mapfile -t tokens < <(tokenize "$VAR_VALUE")
-    echo "DEBUG: Tokens: ${tokens[@]}" >&2
-    
     mapfile -t rpn_tokens < <(to_rpn "${tokens[@]}")
-    echo "DEBUG: RPN: ${rpn_tokens[@]}" >&2
     
     if contains_float "$VAR_VALUE"; then
-        echo "DEBUG: Float expression detected" >&2
         IS_FLOAT=true
         FLOAT_CONSTANTS=$(generate_float_constants "${rpn_tokens[@]}")
         
         DATA_SECTION="    ; Variable: $VAR_NAME (runtime float expression: $VAR_VALUE) (type: float)"$'\n'
         DATA_SECTION="${DATA_SECTION}${FLOAT_CONSTANTS}"
         DATA_SECTION="${DATA_SECTION}    ${VAR_NAME}_float_val dq 0    ; Storage for float result"$'\n'
-        DATA_SECTION="${DATA_SECTION}    ${VAR_NAME} dq float_buffer    ; Pointer for printing"$'\n'
+        DATA_SECTION="${DATA_SECTION}    ${VAR_NAME}_str times 32 db 0    ; Per-variable string buffer"$'\n'
+        DATA_SECTION="${DATA_SECTION}    ${VAR_NAME} dq ${VAR_NAME}_str    ; Pointer for printing"$'\n'
         
         CODE_SECTION=$(generate_asm_code true "${rpn_tokens[@]}")
     else
-        echo "DEBUG: Integer expression detected" >&2
         IS_FLOAT=false
         DATA_SECTION="    ; Variable: $VAR_NAME (runtime evaluated from: $VAR_VALUE) (type: integer)"$'\n'
         DATA_SECTION="${DATA_SECTION}    ${VAR_NAME} dq 0"$'\n'
@@ -327,12 +336,10 @@ if has_operators "$VAR_VALUE"; then
 elif [[ "$VAR_VALUE" =~ ^-?0[xX][0-9a-fA-F]+$ ]] || \
      [[ "$VAR_VALUE" =~ ^-?0[bB][01]+$ ]] || \
      [[ "$VAR_VALUE" =~ ^-?0[0-7]+$ ]]; then
-    echo "DEBUG: Hex/binary/octal literal" >&2
     DATA_SECTION="    ; Variable: $VAR_NAME = $VAR_VALUE (type: integer)"$'\n'
     DATA_SECTION="${DATA_SECTION}    ${VAR_NAME} dq $VAR_VALUE"$'\n'
 
 elif [[ "$VAR_VALUE" =~ ^-?[0-9]*\.[0-9]+$ ]] || [[ "$VAR_VALUE" =~ ^-?[0-9]+[eE][-+]?[0-9]+$ ]]; then
-    echo "DEBUG: Simple float literal" >&2
     IS_FLOAT=true
     FLOAT_VAL=$(printf "%.10f" "$VAR_VALUE" 2>/dev/null | sed 's/\.0*$//' || echo "$VAR_VALUE")
     
@@ -347,14 +354,9 @@ elif [[ "$VAR_VALUE" =~ ^-?[0-9]*\.[0-9]+$ ]] || [[ "$VAR_VALUE" =~ ^-?[0-9]+[eE
     CODE_SECTION="${CODE_SECTION}    fstp qword [${VAR_NAME}_float_val]"$'\n'
 
 else
-    echo "DEBUG: Simple integer literal" >&2
     DATA_SECTION="    ; Variable: $VAR_NAME = $VAR_VALUE (type: integer)"$'\n'
     DATA_SECTION="${DATA_SECTION}    ${VAR_NAME} dq $VAR_VALUE"$'\n'
 fi
-
-echo "DEBUG: IS_FLOAT=$IS_FLOAT" >&2
-echo "DEBUG: DATA_SECTION='$DATA_SECTION'" >&2
-echo "DEBUG: CODE_SECTION='$CODE_SECTION'" >&2
 
 # ----------------------------------------------------------------------
 # Insert into build_output.asm

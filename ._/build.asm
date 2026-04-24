@@ -43,8 +43,7 @@ section .data
              db "section .bss", 10
              db "    print_buffer resb 32", 10
              db "    number_buffer resb 32", 10
-             db "    temp_number resq 1", 10
-             db "    float_buffer resb 32", 10, 10
+             db "    temp_number resq 1", 10, 10
              
              db "section .text", 10
              db "    global _start", 10, 10
@@ -112,26 +111,23 @@ section .data
              db "    ret", 10, 10
              
              db "float_to_str:", 10
-             db "    ; Convert double in xmm0 to string in float_buffer", 10
-             db "    ; Input:  xmm0 = value (double)", 10
-             db "    ; Output: float_buffer = null-terminated string", 10
+             db "    ; Convert double in xmm0 to string.", 10
+             db "    ; Input:  xmm0 = value (double), rdi = output buffer (min 32 bytes)", 10
+             db "    ; Output: buffer filled with null-terminated string", 10
              db "    push rax", 10
              db "    push rbx", 10
              db "    push rcx", 10
              db "    push rdx", 10
              db "    push rsi", 10
-             db "    push rdi", 10
              db "    push r8", 10
              db "    push r9", 10
              db "    push r10", 10
              db "    ", 10
-             db "    ; Clear float_buffer", 10
-             db "    mov rdi, float_buffer", 10
+             db "    ; Clear buffer", 10
              db "    mov rcx, 32", 10
              db "    xor al, al", 10
              db "    rep stosb", 10
-             db "    ", 10
-             db "    mov rdi, float_buffer", 10
+             db "    sub rdi, 32         ; reset pointer to start", 10
              db "    ", 10
              db "    ; Check for negative", 10
              db "    pxor xmm1, xmm1", 10
@@ -242,7 +238,6 @@ section .data
              db "    pop r10", 10
              db "    pop r9", 10
              db "    pop r8", 10
-             db "    pop rdi", 10
              db "    pop rsi", 10
              db "    pop rdx", 10
              db "    pop rcx", 10
@@ -420,7 +415,7 @@ _start:
     mov rax, 2                  ; sys_open
     mov rdi, filename           ; filename
     mov rsi, 0o101              ; O_WRONLY | O_CREAT
-    or rsi, 0o100               ; O_TRUNC (using OR to combine flags)
+    or rsi, 0o100               ; O_TRUNC
     mov rdx, 0o644              ; permissions
     syscall
     

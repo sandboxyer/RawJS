@@ -31,8 +31,10 @@ LOG_ID="log_$(date +%s%N | md5sum | cut -c1-8)"
 get_type() {
     local var="$1"
     
+        local var="$1"
+    
     # Look for standard type comment format
-    local line=$(grep "^[[:space:]]*;.*Variable: ${var}.*(type:" "$OUTPUT_FILE" 2>/dev/null)
+    local line=$(grep ";.*Variable: ${var}.*(type:" "$OUTPUT_FILE" 2>/dev/null)
     if [ -n "$line" ]; then
         if [[ "$line" =~ type:[[:space:]]*([a-z]+) ]]; then
             echo "${BASH_REMATCH[1]}"
@@ -40,11 +42,12 @@ get_type() {
         fi
     fi
     
-    # Check for specific patterns in the file
-    if grep -q "^[[:space:]]*${var}_type db TYPE_NULL" "$OUTPUT_FILE" 2>/dev/null; then
-        echo "null"
+    # Check if variable points to float_buffer
+    if grep -q "^[[:space:]]*${var} dq float_buffer" "$OUTPUT_FILE" 2>/dev/null; then
+        echo "float"
         return
     fi
+
     
     if grep -q "^[[:space:]]*${var}_defined_flag db 0" "$OUTPUT_FILE" 2>/dev/null; then
         echo "undefined"

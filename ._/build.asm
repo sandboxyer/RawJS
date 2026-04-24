@@ -33,7 +33,8 @@ section .data
              db "    false_str db 'false', 0", 10
              db "    null_str db 'null', 0", 10
              db "    undefined_str db 'undefined', 0", 10
-             db "    hex_prefix db '0x', 0", 10, 10
+             db "    hex_prefix db '0x', 0", 10
+             db "    float_scale dq 1000000.0", 10, 10
              
              db "    ; Common utility strings", 10
              db "    space db ' ', 0", 10
@@ -42,12 +43,14 @@ section .data
              db "section .bss", 10
              db "    print_buffer resb 32", 10
              db "    number_buffer resb 32", 10
-             db "    temp_number resq 1", 10, 10
+             db "    temp_number resq 1", 10
+             db "    float_buffer resb 32", 10, 10
              
              db "section .text", 10
              db "    global _start", 10, 10
              
              db "print_raw_string:", 10
+             db "    ; Input: rsi = pointer to null-terminated string", 10
              db "    push rdi", 10
              db "    push rcx", 10
              db "    push rdx", 10
@@ -68,6 +71,7 @@ section .data
              db "    ret", 10, 10
              
              db "print_raw_number:", 10
+             db "    ; Input: [temp_number] = number to print", 10
              db "    push rbx", 10
              db "    push rcx", 10
              db "    push rdx", 10
@@ -107,7 +111,147 @@ section .data
              db "    pop rbx", 10
              db "    ret", 10, 10
              
+             db "float_to_str:", 10
+             db "    ; Convert double in xmm0 to string in float_buffer", 10
+             db "    ; Input:  xmm0 = value (double)", 10
+             db "    ; Output: float_buffer = null-terminated string", 10
+             db "    push rax", 10
+             db "    push rbx", 10
+             db "    push rcx", 10
+             db "    push rdx", 10
+             db "    push rsi", 10
+             db "    push rdi", 10
+             db "    push r8", 10
+             db "    push r9", 10
+             db "    push r10", 10
+             db "    ", 10
+             db "    ; Clear float_buffer", 10
+             db "    mov rdi, float_buffer", 10
+             db "    mov rcx, 32", 10
+             db "    xor al, al", 10
+             db "    rep stosb", 10
+             db "    ", 10
+             db "    mov rdi, float_buffer", 10
+             db "    ", 10
+             db "    ; Check for negative", 10
+             db "    pxor xmm1, xmm1", 10
+             db "    comisd xmm0, xmm1", 10
+             db "    jae .positive", 10
+             db "    mov byte [rdi], '-'", 10
+             db "    inc rdi", 10
+             db "    movsd xmm2, xmm1", 10
+             db "    subsd xmm2, xmm0", 10
+             db "    movsd xmm0, xmm2", 10
+             db ".positive:", 10
+             db "    ", 10
+             db "    ; Extract integer part", 10
+             db "    cvttsd2si r10, xmm0    ; r10 = integer part", 10
+             db "    cvtsi2sd xmm1, r10", 10
+             db "    subsd xmm0, xmm1       ; xmm0 = fractional part (0.0 to 0.999...)", 10
+             db "    ", 10
+             db "    ; Convert integer part to string (store in reverse)", 10
+             db "    mov rbx, rdi           ; Save start of number", 10
+             db "    mov rax, r10", 10
+             db "    mov r8, 10", 10
+             db "    test rax, rax", 10
+             db "    jnz .int_loop", 10
+             db "    mov byte [rdi], '0'", 10
+             db "    inc rdi", 10
+             db "    jmp .reverse_int", 10
+             db ".int_loop:", 10
+             db "    test rax, rax", 10
+             db "    jz .reverse_int", 10
+             db "    xor rdx, rdx", 10
+             db "    div r8", 10
+             db "    add dl, '0'", 10
+             db "    mov [rdi], dl", 10
+             db "    inc rdi", 10
+             db "    jmp .int_loop", 10
+             db ".reverse_int:", 10
+             db "    ; Reverse the integer string in-place", 10
+             db "    mov rsi, rdi", 10
+             db "    dec rsi                ; rsi = last char", 10
+             db ".reverse_loop:", 10
+             db "    cmp rbx, rsi", 10
+             db "    jae .fraction", 10
+             db "    mov al, [rbx]", 10
+             db "    mov ah, [rsi]", 10
+             db "    mov [rbx], ah", 10
+             db "    mov [rsi], al", 10
+             db "    inc rbx", 10
+             db "    dec rsi", 10
+             db "    jmp .reverse_loop", 10
+             db ".fraction:", 10
+             db "    ; Check if fractional part is non-zero", 10
+             db "    pxor xmm2, xmm2", 10
+             db "    comisd xmm0, xmm2", 10
+             db "    je .no_fraction", 10
+             db "    ", 10
+             db "    mov byte [rdi], '.'", 10
+             db "    inc rdi", 10
+             db "    ", 10
+             db "    ; Multiply fractional part by 1,000,000 to get 6 digits", 10
+             db "    movsd xmm1, [float_scale]", 10
+             db "    mulsd xmm0, xmm1       ; xmm0 = fraction * 1,000,000", 10
+             db "    cvttsd2si r9, xmm0      ; r9 = 0 to 999999", 10
+             db "    ", 10
+             db "    ; Convert r9 to 6-digit string with leading zeros", 10
+             db "    mov rax, r9", 10
+             db "    mov r8, 6               ; Digit counter", 10
+             db "    mov r9, 100000          ; Divisor", 10
+             db ".frac_loop:", 10
+             db "    cmp r8, 0", 10
+             db "    je .done", 10
+             db "    ", 10
+             db "    xor rdx, rdx", 10
+             db "    div r9                  ; rax = quotient, rdx = remainder", 10
+             db "    add al, '0'", 10
+             db "    mov [rdi], al", 10
+             db "    inc rdi", 10
+             db "    ", 10
+             db "    ; Prepare for next iteration", 10
+             db "    mov rax, rdx            ; Remainder becomes new dividend", 10
+             db "    push rax", 10
+             db "    xor rdx, rdx", 10
+             db "    mov rax, r9", 10
+             db "    mov rcx, 10", 10
+             db "    div rcx                 ; rax = r9/10", 10
+             db "    mov r9, rax             ; New divisor", 10
+             db "    pop rax                 ; Restore dividend", 10
+             db "    ", 10
+             db "    dec r8", 10
+             db "    jmp .frac_loop", 10
+             db ".no_fraction:", 10
+             db "    jmp .done", 10
+             db ".done:", 10
+             db "    ; Remove trailing zeros after decimal point", 10
+             db "    dec rdi", 10
+             db ".remove_zeros:", 10
+             db "    cmp byte [rdi], '0'", 10
+             db "    jne .check_decimal", 10
+             db "    dec rdi", 10
+             db "    jmp .remove_zeros", 10
+             db ".check_decimal:", 10
+             db "    cmp byte [rdi], '.'", 10
+             db "    jne .terminate", 10
+             db "    dec rdi                ; Remove lone decimal point", 10
+             db ".terminate:", 10
+             db "    inc rdi", 10
+             db "    mov byte [rdi], 0", 10
+             db "    ", 10
+             db "    pop r10", 10
+             db "    pop r9", 10
+             db "    pop r8", 10
+             db "    pop rdi", 10
+             db "    pop rsi", 10
+             db "    pop rdx", 10
+             db "    pop rcx", 10
+             db "    pop rbx", 10
+             db "    pop rax", 10
+             db "    ret", 10, 10
+             
              db "print:", 10
+             db "    ; Input: rax = value/pointer, rdx = type", 10
              db "    cmp rdx, TYPE_STRING", 10
              db "    je .print_string", 10
              db "    cmp rdx, TYPE_NUMBER", 10
@@ -123,14 +267,14 @@ section .data
              db "    cmp rdx, TYPE_UNDEFINED", 10
              db "    je .print_undefined", 10
              db "    jmp .print_hex", 10
-             
+             db "    ", 10
              db ".print_string:", 10
              db "    push rsi", 10
              db "    mov rsi, rax", 10
              db "    call print_raw_string", 10
              db "    pop rsi", 10
              db "    ret", 10
-             
+             db "    ", 10
              db ".print_number:", 10
              db "    push rsi", 10
              db "    push rax", 10
@@ -145,7 +289,7 @@ section .data
              db "    pop rax", 10
              db "    pop rsi", 10
              db "    ret", 10
-             
+             db "    ", 10
              db ".print_float:", 10
              db "    push rsi", 10
              db "    push rax", 10
@@ -155,24 +299,23 @@ section .data
              db "    call print_raw_string", 10
              db "    pop rax", 10
              db "    push rax", 10
-             db "    mov rsi, rax", 10
+             db "    mov rsi, rax           ; rax points to the string", 10
              db "    call print_raw_string", 10
              db "    mov rsi, COLOR_RESET", 10
              db "    call print_raw_string", 10
              db "    pop rax", 10
              db "    pop rsi", 10
              db "    ret", 10
-             
+             db "    ", 10
              db ".print_char:", 10
              db "    push rsi", 10
              db "    mov [print_buffer], al", 10
              db "    mov byte [print_buffer + 1], 0", 10
-             db "    mov rax, print_buffer", 10
-             db "    mov rdx, TYPE_STRING", 10
-             db "    call print", 10
+             db "    mov rsi, print_buffer", 10
+             db "    call print_raw_string", 10
              db "    pop rsi", 10
              db "    ret", 10
-             
+             db "    ", 10
              db ".print_boolean:", 10
              db "    push rsi", 10
              db "    push rax", 10
@@ -183,48 +326,44 @@ section .data
              db "    pop rax", 10
              db "    cmp rax, 0", 10
              db "    je .print_false", 10
-             db "    mov rax, true_str", 10
-             db "    mov rdx, TYPE_STRING", 10
-             db "    call print", 10
+             db "    mov rsi, true_str", 10
+             db "    call print_raw_string", 10
              db "    jmp .bool_done", 10
              db ".print_false:", 10
-             db "    mov rax, false_str", 10
-             db "    mov rdx, TYPE_STRING", 10
-             db "    call print", 10
+             db "    mov rsi, false_str", 10
+             db "    call print_raw_string", 10
              db ".bool_done:", 10
              db "    mov rsi, COLOR_RESET", 10
              db "    call print_raw_string", 10
              db "    pop rsi", 10
              db "    ret", 10
-             
+             db "    ", 10
              db ".print_null:", 10
              db "    push rsi", 10
              db "    mov rsi, COLOR_DARK", 10
              db "    call print_raw_string", 10
              db "    mov rsi, COLOR_GRAY", 10
              db "    call print_raw_string", 10
-             db "    mov rax, null_str", 10
-             db "    mov rdx, TYPE_STRING", 10
-             db "    call print", 10
+             db "    mov rsi, null_str", 10
+             db "    call print_raw_string", 10
              db "    mov rsi, COLOR_RESET", 10
              db "    call print_raw_string", 10
              db "    pop rsi", 10
              db "    ret", 10
-             
+             db "    ", 10
              db ".print_undefined:", 10
              db "    push rsi", 10
              db "    mov rsi, COLOR_DARK", 10
              db "    call print_raw_string", 10
              db "    mov rsi, COLOR_GRAY", 10
              db "    call print_raw_string", 10
-             db "    mov rax, undefined_str", 10
-             db "    mov rdx, TYPE_STRING", 10
-             db "    call print", 10
+             db "    mov rsi, undefined_str", 10
+             db "    call print_raw_string", 10
              db "    mov rsi, COLOR_RESET", 10
              db "    call print_raw_string", 10
              db "    pop rsi", 10
              db "    ret", 10
-             
+             db "    ", 10
              db ".print_hex:", 10
              db "    push rsi", 10
              db "    push rax", 10
@@ -251,8 +390,6 @@ section .data
              db "    mov [rsi], dl", 10
              db "    cmp rax, 0", 10
              db "    jne .hex_loop", 10
-             db "    mov rdi, rsi", 10
-             db "    mov rsi, rdi", 10
              db "    call print_raw_string", 10
              db "    pop rax", 10
              db "    pop rsi", 10
@@ -264,8 +401,8 @@ section .data
              db "    ;   mov rax, 42", 10
              db "    ;   mov rdx, TYPE_NUMBER", 10
              db "    ;   call print", 10
-             db "    ;   mov rax, 1", 10
-             db "    ;   mov rdx, TYPE_BOOLEAN", 10
+             db "    ;   mov rax, newline", 10
+             db "    ;   mov rdx, TYPE_STRING", 10
              db "    ;   call print", 10, 10
              db "    mov rax, 60", 10
              db "    xor rdi, rdi", 10
@@ -280,11 +417,11 @@ section .text
 
 _start:
     ; Create the template file
-    mov rax, 2
-    mov rdi, filename
-    mov rsi, 0o101
-    or rsi, 0o100
-    mov rdx, 0o644
+    mov rax, 2                  ; sys_open
+    mov rdi, filename           ; filename
+    mov rsi, 0o101              ; O_WRONLY | O_CREAT
+    or rsi, 0o100               ; O_TRUNC (using OR to combine flags)
+    mov rdx, 0o644              ; permissions
     syscall
     
     cmp rax, 0
@@ -293,14 +430,14 @@ _start:
     mov [fd], rax
 
     ; Write the template content
-    mov rax, 1
-    mov rdi, [fd]
-    mov rsi, template
-    mov rdx, template_len
+    mov rax, 1                  ; sys_write
+    mov rdi, [fd]               ; file descriptor
+    mov rsi, template           ; buffer
+    mov rdx, template_len       ; length
     syscall
 
     ; Close the file
-    mov rax, 3
+    mov rax, 3                  ; sys_close
     mov rdi, [fd]
     syscall
 

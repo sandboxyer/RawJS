@@ -3,6 +3,8 @@
 # number.sh - Converts JavaScript number declarations to NASM assembly code
 # Generates runtime evaluation code for expressions including floats.
 
+set -x  # Debug: show commands being executed
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && cd .. && pwd)"
 cd "$SCRIPT_DIR/simple"
 
@@ -18,6 +20,8 @@ fi
 INPUT_CONTENT=$(cat "$INPUT_FILE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 INPUT_CONTENT="${INPUT_CONTENT%;}"
 
+echo "DEBUG: INPUT_CONTENT='$INPUT_CONTENT'" >&2
+
 # Extract variable name and value
 if [[ "$INPUT_CONTENT" =~ ^var[[:space:]]+([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
     VAR_NAME="${BASH_REMATCH[1]}"
@@ -28,18 +32,33 @@ else
     exit 1
 fi
 
+echo "DEBUG: VAR_NAME='$VAR_NAME', VAR_VALUE='$VAR_VALUE'" >&2
+
 # ----------------------------------------------------------------------
-# Detect if expression contains any float (decimal point or scientific notation)
+# Detect if expression contains any operators
 # ----------------------------------------------------------------------
-contains_float() {
-    [[ "$1" =~ [0-9]*\.[0-9]+ ]] || [[ "$1" =~ [0-9]+[eE][-+]?[0-9]+ ]]
+has_operators() {
+    local expr="$1"
+    echo "DEBUG: has_operators checking '$expr'" >&2
+    if [[ "$expr" =~ [+*/().%-] ]]; then
+        echo "DEBUG: has_operators TRUE" >&2
+        return 0
+    else
+        echo "DEBUG: has_operators FALSE" >&2
+        return 1
+    fi
 }
 
 # ----------------------------------------------------------------------
-# Helper: check if expression contains operators or parentheses
+# Detect if expression needs float
 # ----------------------------------------------------------------------
-has_operators() {
-    [[ "$1" =~ [\+\-\*/%\(\)] ]]
+contains_float() {
+    local expr="$1"
+    if [[ "$expr" =~ [0-9]*\.[0-9]+ ]] || [[ "$expr" =~ [0-9]+[eE][-+]?[0-9]+ ]] || [[ "$expr" =~ / ]]; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 # ----------------------------------------------------------------------
@@ -77,7 +96,6 @@ tokenize() {
                     has_dot=true
                     i=$((i+1))
                 elif [[ "$nc" =~ [eE] ]]; then
-                    # Scientific notation
                     num="${num}${nc}"
                     i=$((i+1))
                     if [ $i -lt $len ]; then
@@ -176,48 +194,18 @@ to_rpn() {
 }
 
 # ----------------------------------------------------------------------
-# Generate float constants in .data section
+# Generate assembly code from RPN tokens
 # ----------------------------------------------------------------------
-generate_float_constants() {
-    local rpn_tokens=("$@")
-    local const_idx=0
-    local constants=""
-    
-    for token in "${rpn_tokens[@]}"; do
-        local type="${token%%:*}"
-        local val="${token#*:}"
-        
-        if [ "$type" = "FLOAT" ]; then
-            # Convert scientific notation to decimal for dd (single precision)
-            local float_val=$(printf "%.10f" "$val" 2>/dev/null || echo "$val")
-            
-            # Generate unique label
-            local label="${VAR_NAME}_float${const_idx}"
-            constants="${constants}    ${label} dd ${float_val}    ; ${val}"$'\n'
-            const_idx=$((const_idx+1))
-        fi
-    done
-    
-    echo "$constants"
-}
-
-# ----------------------------------------------------------------------
-# Generate assembly code from RPN tokens (FPU version)
-# ----------------------------------------------------------------------
-generate_asm_fpu() {
+generate_asm_code() {
+    local use_float=$1
+    shift
     local rpn_tokens=("$@")
     local code=""
     local const_idx=0
-    local has_float=false
-    
-    # First pass: check if we need FPU
-    for token in "${rpn_tokens[@]}"; do
-        [[ "${token%%:*}" == "FLOAT" ]] && has_float=true
-    done
     
     code="${code}    ; Runtime evaluation of: $VAR_VALUE"$'\n'
     
-    if [ "$has_float" = true ]; then
+    if [ "$use_float" = true ]; then
         code="${code}    ; Using x87 FPU for float operations"$'\n'
     fi
     
@@ -226,95 +214,70 @@ generate_asm_fpu() {
         local val="${token#*:}"
         
         if [ "$type" = "INT" ]; then
-            if [ "$has_float" = true ]; then
-                # Convert integer to float and push to FPU stack
+            if [ "$use_float" = true ]; then
                 code="${code}    push $val"$'\n'
                 code="${code}    fild qword [rsp]"$'\n'
                 code="${code}    add rsp, 8"$'\n'
             else
-                # Pure integer mode - use regular stack
                 code="${code}    push $val"$'\n'
             fi
             
         elif [ "$type" = "FLOAT" ]; then
-            # Load float constant from memory
             local label="${VAR_NAME}_float${const_idx}"
             code="${code}    fld dword [${label}]"$'\n'
             const_idx=$((const_idx+1))
             
         elif [ "$type" = "OP" ]; then
-            if [ "$has_float" = true ]; then
-                # FPU operations
+            if [ "$use_float" = true ]; then
                 case "$val" in
-                    '+')
-                        code="${code}    faddp st1, st0"$'\n'
-                        ;;
-                    '-')
-                        code="${code}    fsubp st1, st0"$'\n'
-                        ;;
-                    '*')
-                        code="${code}    fmulp st1, st0"$'\n'
-                        ;;
-                    '/')
-                        code="${code}    fdivp st1, st0"$'\n'
-                        ;;
-                    '%')
-                        # Modulo with floats - use FPREM
-                        code="${code}    fprem"$'\n'
-                        code="${code}    fstp st1"$'\n'
-                        ;;
+                    '+') code="${code}    faddp st1, st0"$'\n' ;;
+                    '-') code="${code}    fsubp st1, st0"$'\n' ;;
+                    '*') code="${code}    fmulp st1, st0"$'\n' ;;
+                    '/') code="${code}    fdivp st1, st0"$'\n' ;;
+                    '%') code="${code}    fprem"$'\n'
+                         code="${code}    fstp st1"$'\n' ;;
                 esac
             else
-                # Integer operations
                 case "$val" in
-                    '+')
-                        code="${code}    pop rbx"$'\n'
-                        code="${code}    pop rax"$'\n'
-                        code="${code}    add rax, rbx"$'\n'
-                        code="${code}    push rax"$'\n'
-                        ;;
-                    '-')
-                        code="${code}    pop rbx"$'\n'
-                        code="${code}    pop rax"$'\n'
-                        code="${code}    sub rax, rbx"$'\n'
-                        code="${code}    push rax"$'\n'
-                        ;;
-                    '*')
-                        code="${code}    pop rbx"$'\n'
-                        code="${code}    pop rax"$'\n'
-                        code="${code}    imul rbx"$'\n'
-                        code="${code}    push rax"$'\n'
-                        ;;
-                    '/')
-                        code="${code}    xor rdx, rdx"$'\n'
-                        code="${code}    pop rbx"$'\n'
-                        code="${code}    pop rax"$'\n'
-                        code="${code}    idiv rbx"$'\n'
-                        code="${code}    push rax"$'\n'
-                        ;;
-                    '%')
-                        code="${code}    xor rdx, rdx"$'\n'
-                        code="${code}    pop rbx"$'\n'
-                        code="${code}    pop rax"$'\n'
-                        code="${code}    idiv rbx"$'\n'
-                        code="${code}    push rdx"$'\n'
-                        ;;
+                    '+') code="${code}    pop rbx"$'\n'
+                         code="${code}    pop rax"$'\n'
+                         code="${code}    add rax, rbx"$'\n'
+                         code="${code}    push rax"$'\n' ;;
+                    '-') code="${code}    pop rbx"$'\n'
+                         code="${code}    pop rax"$'\n'
+                         code="${code}    sub rax, rbx"$'\n'
+                         code="${code}    push rax"$'\n' ;;
+                    '*') code="${code}    pop rbx"$'\n'
+                         code="${code}    pop rax"$'\n'
+                         code="${code}    imul rbx"$'\n'
+                         code="${code}    push rax"$'\n' ;;
+                    '/') code="${code}    xor rdx, rdx"$'\n'
+                         code="${code}    pop rbx"$'\n'
+                         code="${code}    pop rax"$'\n'
+                         code="${code}    idiv rbx"$'\n'
+                         code="${code}    push rax"$'\n' ;;
+                    '%') code="${code}    xor rdx, rdx"$'\n'
+                         code="${code}    pop rbx"$'\n'
+                         code="${code}    pop rax"$'\n'
+                         code="${code}    idiv rbx"$'\n'
+                         code="${code}    push rdx"$'\n' ;;
                 esac
             fi
         fi
     done
     
     # Store result
-    if [ "$has_float" = true ]; then
-        # Store FPU result to memory as float string
+    if [ "$use_float" = true ]; then
         code="${code}    ; Store float result"$'\n'
         code="${code}    sub rsp, 8"$'\n'
         code="${code}    fstp qword [rsp]"$'\n'
-        code="${code}    pop rax"$'\n'
-        code="${code}    mov [${VAR_NAME}_float_val], rax"$'\n'
-        code="${code}    ; Convert float to string for printing"$'\n'
-        code="${code}    ; Store pointer to float string"$'\n'
-        code="${code}    mov qword [${VAR_NAME}], ${VAR_NAME}_float_str"$'\n'
+        code="${code}    movsd xmm0, [rsp]"$'\n'
+        code="${code}    add rsp, 8"$'\n'
+        code="${code}    movsd [${VAR_NAME}_float_val], xmm0"$'\n'
+        code="${code}    ; Convert float to string"$'\n'
+        code="${code}    movsd xmm0, [${VAR_NAME}_float_val]"$'\n'
+        code="${code}    call float_to_str"$'\n'
+        code="${code}    mov qword [${VAR_NAME}], float_buffer"$'\n'
     else
         code="${code}    pop rax"$'\n'
         code="${code}    mov [${VAR_NAME}], rax"$'\n'
@@ -330,16 +293,46 @@ DATA_SECTION=""
 CODE_SECTION=""
 IS_FLOAT=false
 
-# Handle different value types
-if [[ "$VAR_VALUE" =~ ^-?0[xX][0-9a-fA-F]+$ ]] || \
-   [[ "$VAR_VALUE" =~ ^-?0[bB][01]+$ ]] || \
-   [[ "$VAR_VALUE" =~ ^-?0[0-7]+$ ]]; then
-    # Hex/Binary/Octal literal - integer
+echo "DEBUG: Checking VAR_VALUE='$VAR_VALUE'" >&2
+
+# CHECK FOR OPERATORS FIRST
+if has_operators "$VAR_VALUE"; then
+    echo "DEBUG: Expression detected, evaluating at runtime" >&2
+    
+    mapfile -t tokens < <(tokenize "$VAR_VALUE")
+    echo "DEBUG: Tokens: ${tokens[@]}" >&2
+    
+    mapfile -t rpn_tokens < <(to_rpn "${tokens[@]}")
+    echo "DEBUG: RPN: ${rpn_tokens[@]}" >&2
+    
+    if contains_float "$VAR_VALUE"; then
+        echo "DEBUG: Float expression detected" >&2
+        IS_FLOAT=true
+        FLOAT_CONSTANTS=$(generate_float_constants "${rpn_tokens[@]}")
+        
+        DATA_SECTION="    ; Variable: $VAR_NAME (runtime float expression: $VAR_VALUE) (type: float)"$'\n'
+        DATA_SECTION="${DATA_SECTION}${FLOAT_CONSTANTS}"
+        DATA_SECTION="${DATA_SECTION}    ${VAR_NAME}_float_val dq 0    ; Storage for float result"$'\n'
+        DATA_SECTION="${DATA_SECTION}    ${VAR_NAME} dq float_buffer    ; Pointer for printing"$'\n'
+        
+        CODE_SECTION=$(generate_asm_code true "${rpn_tokens[@]}")
+    else
+        echo "DEBUG: Integer expression detected" >&2
+        IS_FLOAT=false
+        DATA_SECTION="    ; Variable: $VAR_NAME (runtime evaluated from: $VAR_VALUE) (type: integer)"$'\n'
+        DATA_SECTION="${DATA_SECTION}    ${VAR_NAME} dq 0"$'\n'
+        CODE_SECTION=$(generate_asm_code false "${rpn_tokens[@]}")
+    fi
+
+elif [[ "$VAR_VALUE" =~ ^-?0[xX][0-9a-fA-F]+$ ]] || \
+     [[ "$VAR_VALUE" =~ ^-?0[bB][01]+$ ]] || \
+     [[ "$VAR_VALUE" =~ ^-?0[0-7]+$ ]]; then
+    echo "DEBUG: Hex/binary/octal literal" >&2
     DATA_SECTION="    ; Variable: $VAR_NAME = $VAR_VALUE (type: integer)"$'\n'
     DATA_SECTION="${DATA_SECTION}    ${VAR_NAME} dq $VAR_VALUE"$'\n'
 
 elif [[ "$VAR_VALUE" =~ ^-?[0-9]*\.[0-9]+$ ]] || [[ "$VAR_VALUE" =~ ^-?[0-9]+[eE][-+]?[0-9]+$ ]]; then
-    # Simple float literal - NO EXPRESSION
+    echo "DEBUG: Simple float literal" >&2
     IS_FLOAT=true
     FLOAT_VAL=$(printf "%.10f" "$VAR_VALUE" 2>/dev/null | sed 's/\.0*$//' || echo "$VAR_VALUE")
     
@@ -353,35 +346,15 @@ elif [[ "$VAR_VALUE" =~ ^-?[0-9]*\.[0-9]+$ ]] || [[ "$VAR_VALUE" =~ ^-?[0-9]+[eE
     CODE_SECTION="${CODE_SECTION}    fld dword [${VAR_NAME}_float]"$'\n'
     CODE_SECTION="${CODE_SECTION}    fstp qword [${VAR_NAME}_float_val]"$'\n'
 
-elif has_operators "$VAR_VALUE"; then
-    # Expression - evaluate at runtime
-    mapfile -t tokens < <(tokenize "$VAR_VALUE")
-    mapfile -t rpn_tokens < <(to_rpn "${tokens[@]}")
-    
-    # Check if expression contains floats
-    if contains_float "$VAR_VALUE"; then
-        IS_FLOAT=true
-        FLOAT_CONSTANTS=$(generate_float_constants "${rpn_tokens[@]}")
-        
-        DATA_SECTION="    ; Variable: $VAR_NAME (runtime float expression: $VAR_VALUE) (type: float)"$'\n'
-        DATA_SECTION="${DATA_SECTION}${FLOAT_CONSTANTS}"
-        DATA_SECTION="${DATA_SECTION}    ${VAR_NAME}_float_val dq 0    ; Storage for float result"$'\n'
-        DATA_SECTION="${DATA_SECTION}    ${VAR_NAME}_float_str db 32 dup(0)    ; Buffer for float->string"$'\n'
-        DATA_SECTION="${DATA_SECTION}    ${VAR_NAME} dq ${VAR_NAME}_float_str    ; Pointer for printing"$'\n'
-        
-        CODE_SECTION=$(generate_asm_fpu "${rpn_tokens[@]}")
-    else
-        # Pure integer expression
-        DATA_SECTION="    ; Variable: $VAR_NAME (runtime evaluated from: $VAR_VALUE) (type: integer)"$'\n'
-        DATA_SECTION="${DATA_SECTION}    ${VAR_NAME} dq 0"$'\n'
-        CODE_SECTION=$(generate_asm_fpu "${rpn_tokens[@]}")
-    fi
-
 else
-    # Simple integer
+    echo "DEBUG: Simple integer literal" >&2
     DATA_SECTION="    ; Variable: $VAR_NAME = $VAR_VALUE (type: integer)"$'\n'
     DATA_SECTION="${DATA_SECTION}    ${VAR_NAME} dq $VAR_VALUE"$'\n'
 fi
+
+echo "DEBUG: IS_FLOAT=$IS_FLOAT" >&2
+echo "DEBUG: DATA_SECTION='$DATA_SECTION'" >&2
+echo "DEBUG: CODE_SECTION='$CODE_SECTION'" >&2
 
 # ----------------------------------------------------------------------
 # Insert into build_output.asm
@@ -393,7 +366,6 @@ DATA_DONE=0
 CODE_DONE=0
 
 while IFS= read -r line; do
-    # Track sections
     if [[ "$line" == "section .data" ]]; then
         IN_DATA=1
     elif [[ "$line" == section* ]] && [ "$IN_DATA" -eq 1 ]; then
@@ -408,7 +380,6 @@ while IFS= read -r line; do
         IN_START=1
     fi
     
-    # Insert runtime code before exit syscall
     if [ "$IN_START" -eq 1 ] && [ "$CODE_DONE" -eq 0 ] && \
        [[ "$line" =~ ^[[:space:]]*mov[[:space:]]+rax,[[:space:]]*60 ]] && \
        [ -n "$CODE_SECTION" ]; then
@@ -419,7 +390,6 @@ while IFS= read -r line; do
     echo "$line" >> "$TEMP_FILE"
 done < "$OUTPUT_FILE"
 
-# Handle edge cases
 if [ "$IN_DATA" -eq 1 ] && [ "$DATA_DONE" -eq 0 ] && [ -n "$DATA_SECTION" ]; then
     echo "$DATA_SECTION" >> "$TEMP_FILE"
 fi

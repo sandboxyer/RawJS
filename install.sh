@@ -457,7 +457,7 @@ create_basm_wrapper() {
 CALLER_DIR="$(pwd)"
 INSTALL_DIR="/usr/local/etc/rawjs-runtime"
 cd "$CALLER_DIR" || { echo "Cannot navigate to $CALLER_DIR" >&2; exit 1; }
-exec bash "$INSTALL_DIR/._basm/basm.sh" "$@"
+exec bash "$INSTALL_DIR/._/basm/basm.sh" "$@"
 WRAPPER_EOF
 
   chmod +x "$wrapper_path"
@@ -491,16 +491,16 @@ verify_rawjs_structure() {
 verify_basm_structure() {
   local install_dir="$1"
   log_message "Verifying BASM installation structure..."
-  [ -f "$install_dir/._basm/basm.sh" ] || { echo "✗ Missing basm.sh"; return 1; }
-  chmod +x "$install_dir/._basm/basm.sh" 2>/dev/null || true
+  [ -f "$install_dir/._/basm/basm.sh" ] || { echo "✗ Missing basm.sh"; return 1; }
+  chmod +x "$install_dir/._/basm/basm.sh" 2>/dev/null || true
   echo "✓ basm.sh found"
 
   local has_any_arch=false
   for arch in arm-linux i386-linux x86_64-linux; do
-    if [ -d "$install_dir/._basm/$arch" ]; then
+    if [ -d "$install_dir/._/basm/$arch" ]; then
       echo "✓ Found architecture: $arch"
       has_any_arch=true
-      find "$install_dir/._basm/$arch" -maxdepth 1 -name "nasm*" -type f -exec chmod +x {} \; 2>/dev/null
+      find "$install_dir/._/basm/$arch" -maxdepth 1 -name "nasm*" -type f -exec chmod +x {} \; 2>/dev/null
     fi
   done
   [ "$has_any_arch" = false ] && echo "⚠ No NASM architecture directories found"

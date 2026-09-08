@@ -641,7 +641,50 @@ handle_js_content() {
     declaration_type=$(is_declaration "$content")
    
     if [[ -n "$declaration_type" ]]; then
-        # Declaration detected
+        # Check if RHS is a function call assignment
+        if [[ "$content" =~ ^[[:space:]]*(var|let|const)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*=[[:space:]]*[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*\( ]]; then
+            log_info "Detected function call assignment"
+            # Use call.sh to handle assignment and call
+            local input_file="${JS_DIR}call_input"
+            local base_file="${JS_DIR}call"
+            if create_temp_file "$input_file" "$content"; then
+                local file_type
+                file_type=$(check_executable_exists "$base_file")
+                case "$file_type" in
+                    "binary")
+                        if execute_binary "$input_file" "$base_file"; then
+                            processed_count=$((processed_count + 1))
+                        else
+                            error_count=$((error_count + 1))
+                        fi
+                        ;;
+                    "asm")
+                        if execute_basm "$input_file" "${base_file}.asm"; then
+                            processed_count=$((processed_count + 1))
+                        else
+                            error_count=$((error_count + 1))
+                        fi
+                        ;;
+                    "sh")
+                        if execute_sh "$input_file" "${base_file}.sh"; then
+                            processed_count=$((processed_count + 1))
+                        else
+                            error_count=$((error_count + 1))
+                        fi
+                        ;;
+                    *)
+                        log_error "call handler not found for function call assignment"
+                        error_count=$((error_count + 1))
+                        ;;
+                esac
+                return
+            else
+                error_count=$((error_count + 1))
+                return
+            fi
+        fi
+
+        # Declaration detected (original code)
         if [[ "$SILENT_MODE" == false ]]; then
             log_info "Processing declaration: $declaration_type"
         fi

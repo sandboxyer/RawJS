@@ -19,6 +19,19 @@ CALL_STMT=$(cat "$INPUT_FILE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 CALL_STMT=$(echo "$CALL_STMT" | sed 's/;.*$//')
 CALL_STMT=$(echo "$CALL_STMT" | sed 's/))$/)/')
 
+# Check for assignment pattern: var/let/const name = funcCall();
+ASSIGNMENT_MODE=0
+VAR_NAME=""
+if [[ "$CALL_STMT" =~ ^[[:space:]]*(var|let|const)[[:space:]]+([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+    ASSIGNMENT_MODE=1
+    VAR_NAME="${BASH_REMATCH[2]}"
+    CALL_STMT="${BASH_REMATCH[3]}"
+    # Remove trailing semicolon
+    CALL_STMT=$(echo "$CALL_STMT" | sed 's/;.*$//')
+    # Remove trailing spaces
+    CALL_STMT=$(echo "$CALL_STMT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+fi
+
 if [[ "$CALL_STMT" =~ ^([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*\((.*)\)$ ]]; then
     FUNC_NAME="${BASH_REMATCH[1]}"
     ARGS="${BASH_REMATCH[2]}"
@@ -199,6 +212,12 @@ if [ -f "$META_FILE" ]; then
     
     CALL_CODE+="    call ${FUNC_NAME}"$'\n'
     
+    if [ "$ASSIGNMENT_MODE" -eq 1 ]; then
+        CALL_CODE+="    ; Store return value from function"$'\n'
+        CALL_CODE+="    mov [${VAR_NAME}], rax"$'\n'
+        CALL_CODE+="    mov [${VAR_NAME}_type], rdx"$'\n'
+    fi
+    
 else
     # Legacy stack-based
     CALL_CODE="    ; Function call: ${FUNC_NAME}(${ARGS})"$'\n'
@@ -234,6 +253,17 @@ if [ ! -f "$OUTPUT_FILE" ]; then
     exit 1
 fi
 
+# Prepare data insertions (string constants + variable declarations if assignment)
+DATA_INSERT=""
+if [ -n "$STRING_CONSTANTS" ]; then
+    DATA_INSERT="$STRING_CONSTANTS"
+fi
+if [ "$ASSIGNMENT_MODE" -eq 1 ]; then
+    VAR_DECLARATIONS="    ${VAR_NAME} dq 0"$'\n'
+    VAR_DECLARATIONS+="    ${VAR_NAME}_type dq TYPE_UNDEFINED"$'\n'
+    DATA_INSERT+="${VAR_DECLARATIONS}"
+fi
+
 TEMP_FILE=$(mktemp)
 IN_DATA=0
 IN_START=0
@@ -244,8 +274,8 @@ while IFS= read -r line; do
     if [[ "$line" == "section .data" ]]; then
         IN_DATA=1
     elif [[ "$line" == section* ]] && [ "$IN_DATA" -eq 1 ]; then
-        if [ "$DATA_DONE" -eq 0 ] && [ -n "$STRING_CONSTANTS" ]; then
-            echo "$STRING_CONSTANTS" >> "$TEMP_FILE"
+        if [ "$DATA_DONE" -eq 0 ] && [ -n "$DATA_INSERT" ]; then
+            echo "$DATA_INSERT" >> "$TEMP_FILE"
             DATA_DONE=1
         fi
         IN_DATA=0
@@ -264,8 +294,8 @@ while IFS= read -r line; do
     echo "$line" >> "$TEMP_FILE"
 done < "$OUTPUT_FILE"
 
-if [ "$IN_DATA" -eq 1 ] && [ "$DATA_DONE" -eq 0 ] && [ -n "$STRING_CONSTANTS" ]; then
-    echo "$STRING_CONSTANTS" >> "$TEMP_FILE"
+if [ "$IN_DATA" -eq 1 ] && [ "$DATA_DONE" -eq 0 ] && [ -n "$DATA_INSERT" ]; then
+    echo "$DATA_INSERT" >> "$TEMP_FILE"
 fi
 
 if [ "$CODE_DONE" -eq 0 ] && [ -n "$CALL_CODE" ]; then

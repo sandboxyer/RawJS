@@ -404,9 +404,42 @@ else
 fi
 echo ""
 
+# Find return statements in run_output before building function code
+RETURN_EXPR=""
+while IFS= read -r line; do
+    if [[ "$line" == *"return"* ]]; then
+        # Extract expression after return (removing trailing js tags)
+        expr=$(echo "$line" | sed 's/<js-end>.*$//' | sed -n 's/.*return[[:space:]]*\([^;]*\).*/\1/p')
+        expr=$(echo "$expr" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [ -n "$expr" ]; then
+            RETURN_EXPR="$expr"
+            break
+        fi
+    fi
+done < "$RUN_OUTPUT_FILE"
+
 # Prepare the function code to append to parent
 FUNCTION_CODE="${FUNC_NAME}:"$'\n'
 FUNCTION_CODE+="${FUNCTION_BODY}"$'\n'
+
+# Add return value handling if return statement was found
+if [ -n "$RETURN_EXPR" ]; then
+    echo "✓ Found return expression: $RETURN_EXPR"
+    # Determine if it's a variable (identifier)
+    if [[ "$RETURN_EXPR" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]; then
+        # Prefix with function name (scoping)
+        scoped_return="${FUNC_NAME}_${RETURN_EXPR}"
+        FUNCTION_CODE+="    ; Return value: ${RETURN_EXPR}"$'\n'
+        FUNCTION_CODE+="    mov rax, [${scoped_return}]"$'\n'
+        FUNCTION_CODE+="    mov rdx, [${scoped_return}_type]"$'\n'
+    else
+        # For literals, just return 0/undefined for now
+        FUNCTION_CODE+="    ; Return value: ${RETURN_EXPR} (literal not supported)"$'\n'
+        FUNCTION_CODE+="    xor rax, rax"$'\n'
+        FUNCTION_CODE+="    mov rdx, TYPE_UNDEFINED"$'\n'
+    fi
+fi
+
 FUNCTION_CODE+="    ret"$'\n'
 
 # Combine all data for insertion

@@ -18,16 +18,13 @@ fi
 CALL_STMT=$(cat "$INPUT_FILE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 CALL_STMT=$(echo "$CALL_STMT" | sed 's/;.*$//')
 
-# Check for assignment pattern: var/let/const name = funcCall();
 ASSIGNMENT_MODE=0
 VAR_NAME=""
 if [[ "$CALL_STMT" =~ ^[[:space:]]*(var|let|const)[[:space:]]+([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
     ASSIGNMENT_MODE=1
     VAR_NAME="${BASH_REMATCH[2]}"
     CALL_STMT="${BASH_REMATCH[3]}"
-    # Remove trailing semicolon
     CALL_STMT=$(echo "$CALL_STMT" | sed 's/;.*$//')
-    # Remove trailing spaces
     CALL_STMT=$(echo "$CALL_STMT" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 fi
 
@@ -88,10 +85,6 @@ parse_args() {
     printf '%s\n' "${args[@]}"
 }
 
-# Function to generate code for a nested function call argument
-# Parameters:
-#   $1: function call string (e.g., "func(arg1,arg2)")
-#   $2: prefix for temporary variable names
 process_nested_call() {
     local nested_call="$1"
     local prefix="$2"
@@ -99,7 +92,6 @@ process_nested_call() {
     local nested_args_str=""
     local nested_args_array=()
     
-    # Extract function name and arguments
     if [[ "$nested_call" =~ ^([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*\((.*)\)$ ]]; then
         nested_func_name="${BASH_REMATCH[1]}"
         nested_args_str="${BASH_REMATCH[2]}"
@@ -108,13 +100,11 @@ process_nested_call() {
         return 1
     fi
     
-    # Parse nested arguments
     local old_ARGS="$ARGS"
     ARGS="$nested_args_str"
     mapfile -t nested_args_array < <(parse_args)
     ARGS="$old_ARGS"
     
-    # Look up metadata for nested function
     local nested_meta_file="$META_DIR/${nested_func_name}.meta"
     if [ ! -f "$nested_meta_file" ]; then
         echo "Error: No metadata for nested function $nested_func_name"
@@ -135,11 +125,9 @@ process_nested_call() {
         fi
     done < "$nested_meta_file"
     
-    # Generate temporary variable declarations for nested result
     NESTED_DATA_DECLS+="    ${prefix}_result dq 0"$'\n'
     NESTED_DATA_DECLS+="    ${prefix}_result_type dq TYPE_UNDEFINED"$'\n'
     
-    # Generate parameter setup for nested call
     local nested_code=""
     for ((j=0; j<${#nested_param_names[@]}; j++)); do
         local npname="${nested_param_names[$j]}"
@@ -150,7 +138,6 @@ process_nested_call() {
         if [ $j -lt ${#nested_args_array[@]} ]; then
             local narg="${nested_args_array[$j]}"
             
-            # String literal
             if [[ "$narg" =~ ^\".*\"$ ]] || [[ "$narg" =~ ^\'.*\'$ ]]; then
                 local nstripped="${narg:1:${#narg}-2}"
                 local nstripped_esc=$(echo "$nstripped" | sed "s/'/''/g")
@@ -161,12 +148,10 @@ process_nested_call() {
                 nested_code+="    mov [${nscoped}], rax"$'\n'
                 nested_code+="    mov qword [${nscoped}_type], TYPE_STRING"$'\n'
                 
-            # Numeric literal
             elif [[ "$narg" =~ ^-?[0-9]+$ ]]; then
                 nested_code+="    mov qword [${nscoped}], ${narg}"$'\n'
                 nested_code+="    mov qword [${nscoped}_type], TYPE_NUMBER"$'\n'
                 
-            # Float literal
             elif [[ "$narg" =~ ^-?[0-9]*\.[0-9]+$ ]]; then
                 local nfloat_label="${prefix}_nested${j}_float"
                 STRING_CONSTANTS+="    ${nfloat_label} db '${narg}', 0"$'\n'
@@ -175,7 +160,6 @@ process_nested_call() {
                 nested_code+="    mov [${nscoped}], rax"$'\n'
                 nested_code+="    mov qword [${nscoped}_type], TYPE_FLOAT"$'\n'
                 
-            # Boolean
             elif [[ "$narg" == "true" || "$narg" == "false" ]]; then
                 if [ "$narg" == "true" ]; then
                     nested_code+="    mov qword [${nscoped}], 1"$'\n'
@@ -184,7 +168,6 @@ process_nested_call() {
                 fi
                 nested_code+="    mov qword [${nscoped}_type], TYPE_BOOLEAN"$'\n'
                 
-            # null/undefined
             elif [[ "$narg" == "null" ]]; then
                 nested_code+="    mov qword [${nscoped}], 0"$'\n'
                 nested_code+="    mov qword [${nscoped}_type], TYPE_NULL"$'\n'
@@ -192,14 +175,12 @@ process_nested_call() {
                 nested_code+="    mov qword [${nscoped}], 0"$'\n'
                 nested_code+="    mov qword [${nscoped}_type], TYPE_UNDEFINED"$'\n'
             else
-                # Variable reference (assume simple variable for now)
                 nested_code+="    mov rax, [${narg}]"$'\n'
                 nested_code+="    mov [${nscoped}], rax"$'\n'
                 nested_code+="    mov rax, [${narg}_type]"$'\n'
                 nested_code+="    mov [${nscoped}_type], rax"$'\n'
             fi
         else
-            # Use default or undefined
             if [ -n "$npdefault" ]; then
                 case "$nptype" in
                     "number")
@@ -247,6 +228,7 @@ mapfile -t ARGS_ARRAY < <(parse_args)
 META_FILE="$META_DIR/${FUNC_NAME}.meta"
 STRING_CONSTANTS=""
 CALL_CODE=""
+NESTED_DATA_DECLS=""
 
 if [ -f "$META_FILE" ]; then
     declare -a param_names
@@ -274,46 +256,37 @@ if [ -f "$META_FILE" ]; then
         if [ $i -lt ${#ARGS_ARRAY[@]} ]; then
             arg="${ARGS_ARRAY[$i]}"
             
-            # Check if argument is a nested function call
             if [[ "$arg" =~ ^[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*\(.*\)$ ]]; then
                 CALL_CODE+="    ; Nested function call as argument: $arg"$'\n'
-                # Generate code for nested call and store result in temporary
                 temp_prefix="${CALL_ID}_nested${i}"
                 process_nested_call "$arg" "$temp_prefix"
-                # Copy result to parameter
                 CALL_CODE+="    mov rax, [${temp_prefix}_result]"$'\n'
                 CALL_CODE+="    mov [${scoped_param_name}], rax"$'\n'
                 CALL_CODE+="    mov rax, [${temp_prefix}_result_type]"$'\n'
                 CALL_CODE+="    mov [${scoped_param_name}_type], rax"$'\n'
                 
-            # String literal
             elif [[ "$arg" =~ ^\".*\"$ ]] || [[ "$arg" =~ ^\'.*\'$ ]]; then
                 stripped="${arg:1:${#arg}-2}"
                 stripped_esc=$(echo "$stripped" | sed "s/'/''/g")
                 temp_str_label="${CALL_ID}_param${i}_temp_str"
                 STRING_CONSTANTS+="    ${temp_str_label} db '${stripped_esc}', 0"$'\n'
-                CALL_CODE+="    ; Allocate and copy string"$'\n'
                 CALL_CODE+="    mov rsi, ${temp_str_label}"$'\n'
                 CALL_CODE+="    call allocate_string"$'\n'
                 CALL_CODE+="    mov [${scoped_param_name}], rax"$'\n'
                 CALL_CODE+="    mov qword [${scoped_param_name}_type], TYPE_STRING"$'\n'
                 
-            # Numeric literal
             elif [[ "$arg" =~ ^-?[0-9]+$ ]]; then
                 CALL_CODE+="    mov qword [${scoped_param_name}], ${arg}"$'\n'
                 CALL_CODE+="    mov qword [${scoped_param_name}_type], TYPE_NUMBER"$'\n'
                 
-            # Float literal
             elif [[ "$arg" =~ ^-?[0-9]*\.[0-9]+$ ]]; then
                 temp_float_label="${CALL_ID}_param${i}_float_str"
                 STRING_CONSTANTS+="    ${temp_float_label} db '${arg}', 0"$'\n'
-                CALL_CODE+="    ; Allocate and copy float string"$'\n'
                 CALL_CODE+="    mov rsi, ${temp_float_label}"$'\n'
                 CALL_CODE+="    call allocate_string"$'\n'
                 CALL_CODE+="    mov [${scoped_param_name}], rax"$'\n'
                 CALL_CODE+="    mov qword [${scoped_param_name}_type], TYPE_FLOAT"$'\n'
                 
-            # Boolean
             elif [[ "$arg" == "true" ]] || [[ "$arg" == "false" ]]; then
                 if [ "$arg" == "true" ]; then
                     CALL_CODE+="    mov qword [${scoped_param_name}], 1"$'\n'
@@ -322,7 +295,6 @@ if [ -f "$META_FILE" ]; then
                 fi
                 CALL_CODE+="    mov qword [${scoped_param_name}_type], TYPE_BOOLEAN"$'\n'
                 
-            # null/undefined
             elif [[ "$arg" == "null" ]]; then
                 CALL_CODE+="    mov qword [${scoped_param_name}], 0"$'\n'
                 CALL_CODE+="    mov qword [${scoped_param_name}_type], TYPE_NULL"$'\n'
@@ -330,7 +302,6 @@ if [ -f "$META_FILE" ]; then
                 CALL_CODE+="    mov qword [${scoped_param_name}], 0"$'\n'
                 CALL_CODE+="    mov qword [${scoped_param_name}_type], TYPE_UNDEFINED"$'\n'
                 
-            # Variable reference - SIMPLE COPY
             else
                 CALL_CODE+="    ; Copy variable ${arg} to ${scoped_param_name}"$'\n'
                 CALL_CODE+="    mov rax, [${arg}]"$'\n'
@@ -339,7 +310,6 @@ if [ -f "$META_FILE" ]; then
                 CALL_CODE+="    mov [${scoped_param_name}_type], rax"$'\n'
             fi
         else
-            # No argument, use default or undefined
             if [ -n "$param_default" ]; then
                 case "$param_type" in
                     "number")
@@ -384,7 +354,6 @@ if [ -f "$META_FILE" ]; then
     fi
     
 else
-    # Legacy stack-based
     CALL_CODE="    ; Function call: ${FUNC_NAME}(${ARGS})"$'\n'
     
     if [ ${#ARGS_ARRAY[@]} -gt 0 ]; then
@@ -412,13 +381,11 @@ else
     fi
 fi
 
-# Insert into build_output.asm
 if [ ! -f "$OUTPUT_FILE" ]; then
     echo "Error: $OUTPUT_FILE not found"
     exit 1
 fi
 
-# Prepare data insertions (string constants + variable declarations if assignment)
 DATA_INSERT=""
 if [ -n "$STRING_CONSTANTS" ]; then
     DATA_INSERT="$STRING_CONSTANTS"

@@ -583,6 +583,7 @@ BIN_OUTPUT_NAME=""      # Store the output name for --bin mode
 CLI_MODE="false"        # New flag for --cli
 ERROR_MODE="false"      # New flag for --error/--errorfull
 ERROR_MODE_FULL="false" # Flag for --errorfull (implies verbose mode)
+ERROR_DUAL_MODE="false" # Flag for --errordual (error + dual combined)
 
 if [ $# -gt 0 ]; then
     if [ "$1" = "--test" ] || [ "$1" = "--reset" ]; then
@@ -662,6 +663,12 @@ if [ $# -gt 0 ]; then
         VERBOSE_MODE="true"
         FORCE_LOG_MODE="true"
         shift  # Remove --errorfull flag
+    elif [ "$1" = "--errordual" ]; then
+        # Errordual mode: like --error, then run --dual on the same JS file
+        ERROR_MODE="true"
+        ERROR_DUAL_MODE="true"
+        FORCE_LOG_MODE="true"
+        shift  # Remove --errordual flag
     elif [ "$1" = "--bin" ]; then
         # Check if --bin is being used as a tool command (no JS file follows)
         shift  # Remove --bin flag
@@ -707,7 +714,7 @@ if [ $# -gt 0 ]; then
         fi
     else
         # NEW: Check if first argument is a tool name (starts with -- and not a known flag)
-        if [[ "$1" == --* ]] && [ "$1" != "--log" ] && [ "$1" != "--verbose" ] && [ "$1" != "--asm" ] && [ "$1" != "--bin" ] && [ "$1" != "--test" ] && [ "$1" != "--reset" ] && [ "$1" != "--version" ] && [ "$1" != "--v" ] && [ "$1" != "-v" ] && [ "$1" != "-version" ] && [ "$1" != "--tools" ] && [ "$1" != "--cli" ] && [ "$1" != "--dev" ] && [ "$1" != "--error" ] && [ "$1" != "--errorfull" ]; then
+        if [[ "$1" == --* ]] && [ "$1" != "--log" ] && [ "$1" != "--verbose" ] && [ "$1" != "--asm" ] && [ "$1" != "--bin" ] && [ "$1" != "--test" ] && [ "$1" != "--reset" ] && [ "$1" != "--version" ] && [ "$1" != "--v" ] && [ "$1" != "-v" ] && [ "$1" != "-version" ] && [ "$1" != "--tools" ] && [ "$1" != "--cli" ] && [ "$1" != "--dev" ] && [ "$1" != "--error" ] && [ "$1" != "--errorfull" ] && [ "$1" != "--errordual" ]; then
             # Extract tool name by removing leading --
             TOOL_COMMAND="${1#--}"
             TOOL_MODE="true"
@@ -1875,6 +1882,7 @@ show_usage() {
     echo -e "${YELLOW}       bash Raw.sh --bin [options] <build_output.asm>${NC}"
     echo -e "${YELLOW}       bash Raw.sh --error <path/to/file.js> [args...]${NC}"
     echo -e "${YELLOW}       bash Raw.sh --errorfull <path/to/file.js> [args...]${NC}"
+    echo -e "${YELLOW}       bash Raw.sh --errordual <path/to/file.js> [args...]${NC}"
     echo -e "${YELLOW}       bash Raw.sh --start${NC}"
 }
 
@@ -3408,6 +3416,38 @@ main_flow() {
             rm -f "$temp_pipeline_output" "$temp_basm_output"
 
             echo "Error report appended to $error_file"
+
+            # If --errordual was requested, run --dual on the same JS file
+            # and append its output to the same error file in this same run.
+            if [ "$ERROR_DUAL_MODE" = "true" ]; then
+                local temp_dual_output="$CALLER_DIR/.errordual_output.txt"
+                local clean_dual_output=""
+
+                # Run dual.sh directly (no external Raw.sh invocation)
+                execute_file "log" "../._/._/._/._/dual.sh" "file" "$JS_FILE" > "$temp_dual_output" 2>&1
+
+                # Strip ANSI codes from dual output
+                clean_dual_output=$(strip_ansi_codes "$(cat "$temp_dual_output" 2>/dev/null || echo 'Dual output capture failed')")
+
+                # Append dual output to the error file with a clear separator
+                {
+                    echo "========================================="
+                    echo "Dual run at $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+                    echo "JS File: $JS_FILE_PATH"
+                    echo "Command: Raw.sh --dual $JS_FILE"
+                    echo ""
+                    echo "--- Dual Execution Output ---"
+                    echo "$clean_dual_output"
+                    echo ""
+                    echo "========================================="
+                    echo ""
+                } >> "$error_file"
+
+                # Clean up temporary file
+                rm -f "$temp_dual_output"
+                echo "Dual report appended to $error_file"
+            fi
+
             exit 0
         else
             # ----- NORMAL MODE: run pipeline directly -----
